@@ -873,9 +873,9 @@ function DropZone({ onLoad }) {
           <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, letterSpacing: .4 }}>
             SecOps Browser History Analyzer
           </div>
-          <div style={{ fontSize: 9, fontFamily: MONO, color: T.t2, letterSpacing: 1.3, textTransform: "uppercase", marginTop: 2 }}>
+          {/* <div style={{ fontSize: 9, fontFamily: MONO, color: T.t2, letterSpacing: 1.3, textTransform: "uppercase", marginTop: 2 }}>
             Chromium Forensic Viewer
-          </div>
+          </div> */}
         </div>
       </div>
 
@@ -931,9 +931,9 @@ function DropZone({ onLoad }) {
                   {" SQLite — or "}
                   <span style={{ color: T.blue }}>click to browse</span>
                 </div>
-                <div style={{ fontSize: 9, fontFamily: MONO, color: T.t3, marginTop: 2 }}>
+                {/* <div style={{ fontSize: 9, fontFamily: MONO, color: T.t3, marginTop: 2 }}>
                   %LOCALAPPDATA%\…\User Data\Default\History
-                </div>
+                </div> */}
               </>
             )}
           </div>
@@ -975,14 +975,14 @@ function DropZone({ onLoad }) {
       )}
 
       {/* Supported browsers */}
-      <div style={{ marginTop: 18, display: "flex", alignItems: "center", fontSize: 9, fontFamily: MONO, color: T.t3 }}>
+      {/* <div style={{ marginTop: 18, display: "flex", alignItems: "center", fontSize: 9, fontFamily: MONO, color: T.t3 }}>
         {["Edge", "Chrome", "Brave", "Vivaldi", "Opera", "Chromium"].map((b, i) => (
           <span key={b} style={{ display: "flex", alignItems: "center" }}>
             {i > 0 && <span style={{ margin: "0 7px", opacity: 0.3 }}>·</span>}
             {b}
           </span>
         ))}
-      </div>
+      </div> */}
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
@@ -1195,7 +1195,7 @@ export default function App() {
           <div style={{ width: 1, height: 18, background: T.border }} />
 
           {/* Compact stats — visits · urls · dl only */}
-          <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: MONO }}>
+          {/* <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: MONO }}>
             <span style={{ color: T.green }}>{(stats.total_visits || 0).toLocaleString()}</span>
             <span style={{ color: T.t3 }}>visits</span>
             <span style={{ color: T.t3 }}>·</span>
@@ -1210,7 +1210,7 @@ export default function App() {
                 <span style={{ color: T.teal }}>last {stats.hours_filter}h</span>
               </>
             )}
-          </div>
+          </div> */}
 
           <div style={{ width: 1, height: 18, background: T.border }} />
 
