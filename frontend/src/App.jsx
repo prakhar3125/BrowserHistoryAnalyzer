@@ -835,7 +835,6 @@ function DropZone({ onLoad }) {
   const ref = useRef()
 
   const upload = async file => {
-    // Compute totalHours at call time (FIX 7: avoids stale closure)
     const totalHours = allTime ? null : (days * 24 + hoursExtra)
     setLoading(true); setError(null)
     try {
@@ -853,88 +852,112 @@ function DropZone({ onLoad }) {
   const handleFile = file => { if (file) upload(file) }
 
   return (
-    <div style={{
-      flex: 1, display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center",
-      background: T.bg,
-      backgroundImage: `radial-gradient(ellipse 55% 40% at 50% 52%, ${T.surf}cc 0%, transparent 75%)`,
-    }}>
+    // ── Full-page drop zone ──────────────────────────────
+    <div
+      onDragOver={e  => { e.preventDefault(); setDrag(true) }}
+      onDragLeave={e => {
+        // Only clear drag when leaving the viewport entirely
+        if (!e.currentTarget.contains(e.relatedTarget)) setDrag(false)
+      }}
+      onDrop={e => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]) }}
+      style={{
+        flex: 1, display: "flex", flexDirection: "column",
+        alignItems: "center", justifyContent: "center",
+        background: T.bg,
+        backgroundImage: `radial-gradient(ellipse 55% 40% at 50% 52%, ${T.surf}cc 0%, transparent 75%)`,
+        // Full-page drag overlay border
+        outline: drag ? `2px solid ${T.blue}` : "2px solid transparent",
+        outlineOffset: "-2px",
+        transition: "outline-color .15s, background .15s",
+        cursor: loading ? "wait" : "default",
+        position: "relative",
+      }}
+    >
+      {/* Full-page drag overlay label */}
+      {drag && (
+        <div style={{
+          position: "absolute", inset: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: `${T.blue}08`,
+          pointerEvents: "none", zIndex: 10,
+        }}>
+          <div style={{
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
+            padding: "24px 40px",
+            background: `${T.panel}ee`,
+            border: `1.5px solid ${T.blue}60`,
+            borderRadius: 12,
+            backdropFilter: "blur(8px)",
+          }}>
+            <Upload size={28} color={T.blue} strokeWidth={1.5} />
+            <span style={{ fontSize: 13, fontFamily: MONO, color: T.blue, fontWeight: 700 }}>
+              Release to load
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Wordmark */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 32 }}>
-        <div style={{
-          width: 32, height: 32, borderRadius: 8,
-          background: `${T.blue}16`, border: `1px solid ${T.blue}40`,
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          <Shield size={14} color={T.blue} strokeWidth={1.8} />
-        </div>
+        <img
+          src="/image.png"
+          alt="logo"
+          style={{
+            width: 42, height: 42, objectFit: "contain",
+            borderRadius: 9, flexShrink: 0,
+            border: "1.5px solid rgba(255,255,255,0.25)",
+          }}
+        />
         <div>
           <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, letterSpacing: .4 }}>
             SecOps Browser History Analyzer
           </div>
-          {/* <div style={{ fontSize: 9, fontFamily: MONO, color: T.t2, letterSpacing: 1.3, textTransform: "uppercase", marginTop: 2 }}>
-            Chromium Forensic Viewer
-          </div> */}
         </div>
       </div>
 
-      {/* Card */}
+      {/* Card — click to browse only, no drag handlers needed here */}
       <div style={{
         width: 430,
         background: T.panel,
-        border: `1px solid ${drag ? T.blue : error ? `${T.red}50` : T.border}`,
+        border: `1px solid ${error ? `${T.red}50` : T.border}`,
         borderRadius: 8, overflow: "hidden",
+        boxShadow: `0 24px 64px rgba(0,8,30,0.5)`,
         transition: "border-color .15s",
-        boxShadow: drag
-          ? `0 0 0 3px ${T.blue}16, 0 24px 64px rgba(0,8,30,0.7)`
-          : `0 24px 64px rgba(0,8,30,0.5)`,
       }}>
 
-        {/* Drop target */}
+        {/* Click target */}
         <div
-          onDragOver={e  => { e.preventDefault(); setDrag(true) }}
-          onDragLeave={() => setDrag(false)}
-          onDrop={e  => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]) }}
           onClick={() => !loading && ref.current.click()}
           style={{
             padding: "26px 36px 20px",
             display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
             cursor: loading ? "wait" : "pointer",
             borderBottom: `1px solid ${T.border}`,
-            background: drag ? `${T.blue}08` : "transparent",
-            transition: "background .15s",
           }}
         >
           <div style={{
             width: 36, height: 36, borderRadius: 8,
-            background: loading || drag ? `${T.blue}18` : T.card,
-            border: `1px solid ${loading || drag ? `${T.blue}55` : T.border2}`,
+            background: loading ? `${T.blue}18` : T.card,
+            border: `1px solid ${loading ? `${T.blue}55` : T.border2}`,
             display: "flex", alignItems: "center", justifyContent: "center",
             transition: "all .15s",
           }}>
             {loading
               ? <Loader size={15} color={T.blue} strokeWidth={1.5} style={{ animation: "spin 1s linear infinite" }} />
-              : <Upload size={15} color={drag ? T.blue : T.t1} strokeWidth={1.5} />
+              : <Upload size={15} color={T.t1} strokeWidth={1.5} />
             }
           </div>
 
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, marginBottom: 5 }}>
-              {loading ? "Parsing…" : drag ? "Release to load" : "Drop History file"}
+              {loading ? "Parsing…" : "Drop anywhere or click to browse"}
             </div>
             {!loading && (
-              <>
-                <div style={{ fontSize: 10, fontFamily: MONO, color: T.t2, lineHeight: 1.9 }}>
-                  Raw Chromium{" "}
-                  <code style={{ color: T.blue, background: `${T.blue}14`, padding: "1px 5px", borderRadius: 3 }}>History</code>
-                  {" SQLite — or "}
-                  <span style={{ color: T.blue }}>click to browse</span>
-                </div>
-                {/* <div style={{ fontSize: 9, fontFamily: MONO, color: T.t3, marginTop: 2 }}>
-                  %LOCALAPPDATA%\…\User Data\Default\History
-                </div> */}
-              </>
+              <div style={{ fontSize: 10, fontFamily: MONO, color: T.t2, lineHeight: 1.9 }}>
+                Raw Chromium{" "}
+                <code style={{ color: T.blue, background: `${T.blue}14`, padding: "1px 5px", borderRadius: 3 }}>History</code>
+                {" SQLite file"}
+              </div>
             )}
           </div>
         </div>
@@ -973,16 +996,6 @@ function DropZone({ onLoad }) {
           </button>
         </div>
       )}
-
-      {/* Supported browsers */}
-      {/* <div style={{ marginTop: 18, display: "flex", alignItems: "center", fontSize: 9, fontFamily: MONO, color: T.t3 }}>
-        {["Edge", "Chrome", "Brave", "Vivaldi", "Opera", "Chromium"].map((b, i) => (
-          <span key={b} style={{ display: "flex", alignItems: "center" }}>
-            {i > 0 && <span style={{ margin: "0 7px", opacity: 0.3 }}>·</span>}
-            {b}
-          </span>
-        ))}
-      </div> */}
 
       <style>{`
         @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
@@ -1124,13 +1137,16 @@ export default function App() {
           borderRight: `1px solid ${T.border}`,
           height: "100%", flexShrink: 0,
         }}>
-          <div style={{
-            width: 22, height: 22, borderRadius: 5,
-            background: `${T.blue}18`, border: `1px solid ${T.blue}40`,
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}>
-            <Shield size={11} color={T.blue} strokeWidth={2} />
-          </div>
+          <img
+  src="/image.png"
+  alt="logo"
+  style={{
+    width: 32, height: 32, objectFit: "contain",
+    borderRadius: 9, flexShrink: 0,
+    border: "1.5px solid rgba(255,255,255,0.25)",
+  }}
+/>
+
           <span style={{ fontSize: 11, fontWeight: 700, color: T.t0, letterSpacing: .3, whiteSpace: "nowrap" }}>
             SecOps Browser History Analyzer
           </span>
