@@ -1,32 +1,44 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react"
 import {
   Upload, ChevronRight, ChevronDown, Search, X, Clock,
-  Download, RefreshCw, AlertTriangle, Shield, Database,
-  Network, SortAsc, SortDesc, Loader, PanelRightClose
+  Download, RefreshCw, Shield, Database,
+  Network, SortAsc, SortDesc, Loader, PanelRightClose, FileDown
 } from "lucide-react"
+import * as XLSX from "xlsx"
 import { parseHistory } from "./parseHistory"
 
 /* ═══════════════════════════════════════════════════════════
-   THEME
+   THEME  —  #001437 navy · #d94642 red · #1da3dd blue
 ═══════════════════════════════════════════════════════════ */
 const T = {
-  bg:      "#07080e", surf:    "#0c0d16", panel:   "#10111c",
-  card:    "#151622", hover:   "#1a1b28", border:  "#1f2032",
-  border2: "#272840",
-  blue:    "#4f8ef7", cyan:    "#1fb6d4", green:   "#2ecc8a",
-  red:     "#e85858", amber:   "#e8a020", purple:  "#9b7ae8",
+  bg:      "#001437",
+  surf:    "#001d4a",
+  panel:   "#00102e",
+  card:    "#011f52",
+  hover:   "#022460",
+  border:  "#0b2d6b",
+  border2: "#123580",
+
+  blue:    "#1da3dd",
+  red:     "#d94642",
+  green:   "#2ecc8a",
+  amber:   "#e8a020",
+  purple:  "#9b7ae8",
   teal:    "#1ab8a8",
-  t0:      "#dde0f0", t1:      "#7e82a0", t2:      "#40425a",
-  t3:      "#252638",
-  sel:     "#1a2c55",
+
+  t0:      "#c8d8f0",
+  t1:      "#5a7da8",
+  t2:      "#2a4870",
+  t3:      "#152840",
+  sel:     "#0a2e6e",
 }
 
 const TC = {
-  TYPED:             T.green,  LINK:              T.blue,
-  FORM_SUBMIT:       T.red,    RELOAD:            T.amber,
-  AUTO_BOOKMARK:     T.cyan,   GENERATED:         T.purple,
-  KEYWORD:           T.purple, KEYWORD_GENERATED: T.purple,
-  AUTO_TOPLEVEL:     T.teal,   AUTO_SUBFRAME:     T.t2,
+  TYPED:             T.green,   LINK:              T.blue,
+  FORM_SUBMIT:       T.red,     RELOAD:            T.amber,
+  AUTO_BOOKMARK:     T.teal,    GENERATED:         T.purple,
+  KEYWORD:           T.purple,  KEYWORD_GENERATED: T.purple,
+  AUTO_TOPLEVEL:     T.teal,    AUTO_SUBFRAME:     T.t2,
   MANUAL_SUBFRAME:   T.t2,
 }
 
@@ -49,36 +61,26 @@ const fmtBytes = b => {
   if (b < 1 << 30) return `${(b / (1 << 20)).toFixed(1)}MB`
   return `${(b / (1 << 30)).toFixed(2)}GB`
 }
-const tIST = ts => ts?.ist || ts?.utc || "—"
-const tUTC = ts => ts?.utc || "—"
 
-// FIX 8: dom() — null/undefined safe. Previously catch returned `undefined`
-//         (url?.slice(0,40) on undefined = undefined, not ""), which broke <TD>.
+// Primary display respects tz toggle; secondary shows the other
+const tShow = (ts, tz) => (tz === "ist" ? ts?.ist : ts?.utc) || ts?.utc || ts?.ist || "—"
+const tAlt  = (ts, tz) => (tz === "ist" ? ts?.utc : ts?.ist) || "—"
+const tIST  = ts => ts?.ist || ts?.utc || "—"
+const tUTC  = ts => ts?.utc || "—"
+
 const dom = url => {
   try { return url.split("//")[1].split("/")[0].replace(/^www\./, "") }
   catch { return url?.slice?.(0, 40) ?? "" }
 }
 
 /* ═══════════════════════════════════════════════════════════
-   FIX 4: flattenTree — proper ancestor context rows for filtered results.
-   
-   OLD BUG: when a parent didn't match the filter but a child did, the child
-   appeared at its original depth with no parent row above it — orphaned
-   indentation and broken tree structure.
-   
-   FIX: two-pass approach:
-     Pass 1 — build selfMatch (nodes whose url/title match the filter)
-     Pass 2 — propagate descMatch upward via a parent map so every ancestor
-              of a matching node is marked as a "context" ancestor
-   Traversal — selfMatch nodes render normally; descMatch-only nodes render
-   as dimmed context rows and are force-expanded so descendants are visible.
+   flattenTree — two-pass filter with ancestor context rows
 ═══════════════════════════════════════════════════════════ */
 function flattenTree(rootIds, childrenMap, byId, openSet, filter, limit = 4000) {
   const ft  = filter.toLowerCase()
   const out = []
 
   if (!ft) {
-    // No filter — standard open/close traversal
     const stack = [...rootIds].reverse().map(id => ({ id, depth: 0 }))
     while (stack.length && out.length < limit) {
       const { id, depth } = stack.pop()
@@ -86,43 +88,36 @@ function flattenTree(rootIds, childrenMap, byId, openSet, filter, limit = 4000) 
       const kids   = childrenMap[id] || []
       const isOpen = openSet.has(id)
       out.push({ id, depth, hasKids: kids.length > 0, open: isOpen, dimmed: false })
-      if (isOpen) {
+      if (isOpen)
         for (let i = kids.length - 1; i >= 0; i--)
           stack.push({ id: kids[i], depth: depth + 1 })
-      }
     }
     return out
   }
 
-  // Pass 1: which nodes self-match?
+  // Pass 1: self-matching nodes
   const selfMatch = new Set()
   for (const idStr of Object.keys(byId)) {
-    const v = byId[idStr]
-    if (!v) continue
-    if (
-      (v.url   || "").toLowerCase().includes(ft) ||
-      (v.title || "").toLowerCase().includes(ft)
-    ) selfMatch.add(Number(idStr))
+    const v = byId[idStr]; if (!v) continue
+    if ((v.url || "").toLowerCase().includes(ft) || (v.title || "").toLowerCase().includes(ft))
+      selfMatch.add(Number(idStr))
   }
 
-  // Build child→parent map for upward propagation
+  // Build child → parent map
   const parentOf = {}
-  for (const [pid, kids] of Object.entries(childrenMap)) {
+  for (const [pid, kids] of Object.entries(childrenMap))
     for (const kid of kids) parentOf[kid] = Number(pid)
-  }
 
-  // Pass 2: mark all ancestors of selfMatch nodes as descMatch context rows
+  // Pass 2: mark all ancestors as context rows
   const descMatch = new Set()
   for (const id of selfMatch) {
     let cur = parentOf[id]
     while (cur !== undefined) {
-      if (descMatch.has(cur)) break  // already propagated from here upward
-      descMatch.add(cur)
-      cur = parentOf[cur]
+      if (descMatch.has(cur)) break
+      descMatch.add(cur); cur = parentOf[cur]
     }
   }
 
-  // Traversal: include selfMatch (normal) + descMatch (dimmed, force-expanded)
   const stack = [...rootIds].reverse().map(id => ({ id, depth: 0 }))
   while (stack.length && out.length < limit) {
     const { id, depth } = stack.pop()
@@ -132,95 +127,91 @@ function flattenTree(rootIds, childrenMap, byId, openSet, filter, limit = 4000) 
     const isSelf = selfMatch.has(id)
     const isCtx  = !isSelf && descMatch.has(id)
 
-    if (isSelf) {
-      out.push({ id, depth, hasKids: kids.length > 0, open: isOpen, dimmed: false })
-    } else if (isCtx) {
-      // Force open=true so its children (including matching descendants) are shown
-      out.push({ id, depth, hasKids: kids.length > 0, open: true, dimmed: true })
-    }
-    // else: no match anywhere in subtree — skip entirely
+    if (isSelf)     out.push({ id, depth, hasKids: kids.length > 0, open: isOpen, dimmed: false })
+    else if (isCtx) out.push({ id, depth, hasKids: kids.length > 0, open: true,   dimmed: true  })
 
-    // Descend into: opened self-match nodes, or any context node (always expanded)
-    if ((isSelf && isOpen) || isCtx) {
+    if ((isSelf && isOpen) || isCtx)
       for (let i = kids.length - 1; i >= 0; i--)
         stack.push({ id: kids[i], depth: depth + 1 })
-    }
   }
   return out
 }
 
 /* ═══════════════════════════════════════════════════════════
-   STYLE PRIMITIVES
+   useSort — type-aware comparator: timestamps, numbers, strings
+═══════════════════════════════════════════════════════════ */
+function useSort(data, def) {
+  const [col, setCol] = useState(def)
+  const [asc, setAsc] = useState(false)
+  const toggle = c => { if (col === c) setAsc(a => !a); else { setCol(c); setAsc(true) } }
+
+  const sorted = useMemo(() => {
+    if (!col) return data
+    return [...data].sort((a, b) => {
+      let av = a[col], bv = b[col]
+      // Timestamp objects { unix_ms, ist, utc } → compare numerically
+      if (av && typeof av === "object" && "unix_ms" in av) av = av.unix_ms ?? 0
+      if (bv && typeof bv === "object" && "unix_ms" in bv) bv = bv.unix_ms ?? 0
+      const na = Number(av), nb = Number(bv)
+      if (!isNaN(na) && !isNaN(nb)) return asc ? na - nb : nb - na
+      return asc
+        ? String(av ?? "").localeCompare(String(bv ?? ""))
+        : String(bv ?? "").localeCompare(String(av ?? ""))
+    })
+  }, [data, col, asc])
+
+  return { sorted, col, asc, toggle }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PRIMITIVES
 ═══════════════════════════════════════════════════════════ */
 const Badge = ({ text, color }) => (
   <span style={{
     display: "inline-block", padding: "1px 7px", borderRadius: 3,
     fontSize: 10, fontFamily: MONO, fontWeight: 700, letterSpacing: .5,
-    color, background: `${color}18`, border: `1px solid ${color}30`
+    color, background: `${color}22`, border: `1px solid ${color}40`
   }}>{text}</span>
 )
 
-/* ═══════════════════════════════════════════════════════════
-   TH  —  resizable column header
-   FIX 1: removed duplicate `position: "sticky"` key in style object.
-          JS objects silently drop earlier duplicate keys; harmless here
-          since both values were identical, but causes linter errors and
-          confuses future edits.
-═══════════════════════════════════════════════════════════ */
 const TH = ({ children, width, onClick, sorted, onResize }) => {
-  const handleMouseDown = (e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    const startX = e.clientX
-    const startW = typeof width === "number" ? width : 100
-    const onMove = mv => { onResize && onResize(Math.max(36, startW + mv.clientX - startX)) }
+  const handleMouseDown = e => {
+    e.preventDefault(); e.stopPropagation()
+    const startX = e.clientX, startW = typeof width === "number" ? width : 100
+    const onMove = mv => onResize && onResize(Math.max(36, startW + mv.clientX - startX))
     const onUp   = () => {
       document.removeEventListener("mousemove", onMove)
       document.removeEventListener("mouseup",   onUp)
-      document.body.style.cursor     = ""
-      document.body.style.userSelect = ""
+      document.body.style.cursor = document.body.style.userSelect = ""
     }
     document.addEventListener("mousemove", onMove)
     document.addEventListener("mouseup",   onUp)
     document.body.style.cursor     = "col-resize"
     document.body.style.userSelect = "none"
   }
-
   return (
-    <th
-      onClick={onClick}
-      style={{
-        padding: "7px 10px", textAlign: "left",
-        fontSize: 10, fontFamily: MONO, fontWeight: 700, color: T.blue,
-        background: T.panel, borderBottom: `1px solid ${T.border}`,
-        whiteSpace: "nowrap",
-        width:    typeof width === "number" ? width : undefined,
-        minWidth: typeof width === "number" ? width : undefined,
-        maxWidth: typeof width === "number" ? width : undefined,
-        cursor: onClick ? "pointer" : "default",
-        userSelect: "none",
-        position: "sticky", top: 0, zIndex: 1,   // ← single declaration (FIX 1)
-        boxSizing: "border-box",
-      }}
-    >
+    <th onClick={onClick} style={{
+      padding: "7px 10px", textAlign: "left",
+      fontSize: 10, fontFamily: MONO, fontWeight: 700, color: T.blue,
+      background: T.panel, borderBottom: `1px solid ${T.border}`,
+      whiteSpace: "nowrap",
+      width:    typeof width === "number" ? width : undefined,
+      minWidth: typeof width === "number" ? width : undefined,
+      maxWidth: typeof width === "number" ? width : undefined,
+      cursor: onClick ? "pointer" : "default",
+      userSelect: "none", position: "sticky", top: 0, zIndex: 1,
+      boxSizing: "border-box",
+    }}>
       <div style={{ display: "flex", alignItems: "center", gap: 4, paddingRight: 8 }}>
-        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
-          {children}
-        </span>
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{children}</span>
         {sorted === "asc"  && <SortAsc  size={10} style={{ flexShrink: 0 }} />}
         {sorted === "desc" && <SortDesc size={10} style={{ flexShrink: 0 }} />}
       </div>
-
       {onResize && (
-        <div
-          onMouseDown={handleMouseDown}
-          onClick={e => e.stopPropagation()}
-          style={{
-            position: "absolute", right: 0, top: 0, bottom: 0, width: 6,
-            cursor: "col-resize", zIndex: 2,
-            borderRight: "2px solid transparent",
-            transition: "border-color .1s",
-          }}
+        <div onMouseDown={handleMouseDown} onClick={e => e.stopPropagation()} style={{
+          position: "absolute", right: 0, top: 0, bottom: 0, width: 6,
+          cursor: "col-resize", zIndex: 2, borderRight: "2px solid transparent", transition: "border-color .1s",
+        }}
           onMouseEnter={e => { e.currentTarget.style.borderRightColor = T.blue }}
           onMouseLeave={e => { e.currentTarget.style.borderRightColor = "transparent" }}
         />
@@ -233,58 +224,45 @@ const TD = ({ children, color = T.t0, mono = true, truncate = true }) => (
   <td style={{
     padding: "6px 10px", fontSize: 11,
     fontFamily: mono ? MONO : undefined, color,
-    whiteSpace:   truncate ? "nowrap"   : undefined,
-    maxWidth:     truncate ? 280        : undefined,
-    overflow:     truncate ? "hidden"   : undefined,
+    whiteSpace: truncate ? "nowrap" : undefined,
+    maxWidth: truncate ? 280 : undefined,
+    overflow: truncate ? "hidden" : undefined,
     textOverflow: truncate ? "ellipsis" : undefined,
-    borderBottom: `1px solid ${T.border}`
-  }}>
-    {children}
-  </td>
+    borderBottom: `1px solid ${T.border}`,
+  }}>{children}</td>
 )
 
 /* ═══════════════════════════════════════════════════════════
-   FIX 2 + FIX 3: useSort — type-aware comparator.
-
-   OLD BUG: all values were cast to String() before comparing.
-   - visit_time is { unix_ms, ist, utc } → String({}) = "[object Object]"
-     for every row, so clicking the Time column header did nothing.
-   - Numeric fields sorted lexicographically ("9" > "10").
-
-   FIX: detect timestamp objects (has unix_ms), use numeric compare for
-   numbers, fall back to localeCompare for strings.
+   UTC/IST PILL TOGGLE
 ═══════════════════════════════════════════════════════════ */
-function useSort(data, def) {
-  const [col, setCol] = useState(def)
-  const [asc, setAsc] = useState(false)
-  const toggle = c => { if (col === c) setAsc(a => !a); else { setCol(c); setAsc(true) } }
-
-  const sorted = useMemo(() => {
-    if (!col) return data
-    return [...data].sort((a, b) => {
-      let av = a[col], bv = b[col]
-
-      // Timestamp objects { unix_ms, ist, utc } → compare by unix_ms
-      if (av && typeof av === "object" && "unix_ms" in av) av = av.unix_ms ?? 0
-      if (bv && typeof bv === "object" && "unix_ms" in bv) bv = bv.unix_ms ?? 0
-
-      // Numeric compare (covers visit_id, duration, http codes, unix_ms)
-      const na = Number(av), nb = Number(bv)
-      if (!isNaN(na) && !isNaN(nb)) return asc ? na - nb : nb - na
-
-      // String compare
-      const sa = String(av ?? ""), sb = String(bv ?? "")
-      return asc ? sa.localeCompare(sb) : sb.localeCompare(sa)
-    })
-  }, [data, col, asc])
-
-  return { sorted, col, asc, toggle }
+function TzToggle({ tz, setTz }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center",
+      background: T.panel, border: `1px solid ${T.border}`,
+      borderRadius: 4, overflow: "hidden", height: 26,
+    }}>
+      {["ist", "utc"].map(z => (
+        <button key={z} onClick={() => setTz(z)} style={{
+          padding: "0 10px", height: "100%",
+          background: tz === z ? T.blue : "transparent",
+          border: "none",
+          color: tz === z ? "#fff" : T.t1,
+          fontSize: 10, fontFamily: MONO, fontWeight: 700,
+          cursor: "pointer", letterSpacing: .8,
+          transition: "background .12s, color .12s",
+        }}>
+          {z.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  )
 }
 
 /* ═══════════════════════════════════════════════════════════
    DETAIL PANEL CONTENT
 ═══════════════════════════════════════════════════════════ */
-function DetailPanelContent({ item, type }) {
+function DetailPanelContent({ item, type, tz }) {
   if (!item) return (
     <div style={{
       display: "flex", flexDirection: "column", alignItems: "center",
@@ -301,7 +279,6 @@ function DetailPanelContent({ item, type }) {
       <span style={{ fontSize: 11, fontFamily: MONO, color, wordBreak: "break-all", lineHeight: 1.5 }}>{value || "—"}</span>
     </div>
   )
-
   const Sep = ({ title }) => (
     <div style={{ margin: "14px 0 8px", paddingBottom: 5, borderBottom: `1px solid ${T.border}` }}>
       <span style={{ fontSize: 9, fontFamily: MONO, color: T.blue, textTransform: "uppercase", letterSpacing: 1.4, fontWeight: 700 }}>{title}</span>
@@ -309,36 +286,32 @@ function DetailPanelContent({ item, type }) {
   )
 
   if (type === "visit") {
-    const v   = item
-    const tr  = v.transition || {}
-    const ctx = v.context    || {}
-    const cnt = v.content    || {}
+    const v = item, tr = v.transition || {}, ctx = v.context || {}, cnt = v.content || {}
     const http = String(ctx.http_response_code || "")
-    const httpColor = http.startsWith("4") || http.startsWith("5") ? T.red
-                    : http === "200" ? T.green : T.t0
+    const httpColor = http.startsWith("4") || http.startsWith("5") ? T.red : http === "200" ? T.green : T.t0
     return (
       <div style={{ padding: "14px 16px" }}>
-        <Row label="URL"       value={v.url}   color={T.cyan} />
-        <Row label="Title"     value={v.title} color={T.t0} />
-        <Row label="IST"       value={tIST(v.visit_time)} />
-        <Row label="UTC"       value={tUTC(v.visit_time)} color={T.t1} />
+        <Row label="URL"       value={v.url}   color={T.blue} />
+        <Row label="Title"     value={v.title} />
+        <Row label="IST"       value={tIST(v.visit_time)} color={tz === "ist" ? T.t0 : T.t1} />
+        <Row label="UTC"       value={tUTC(v.visit_time)} color={tz === "utc" ? T.t0 : T.t1} />
         <Row label="Visit ID"  value={String(v.visit_id)} color={T.t2} />
         <Sep title="Navigation" />
         <Row label="Transition" value={tr.core_type}                            color={TC[tr.core_type] || T.t0} />
         <Row label="Qualifiers" value={(tr.qualifiers || []).join(", ") || "—"} color={T.t1} />
         <Row label="From Visit" value={String(v.from_visit || "— root")} />
         <Row label="Opener"     value={String(v.opener_visit || "—")}           color={T.t1} />
-        <Row label="Referrer"   value={v.external_referrer_url}                 color={T.cyan} />
+        <Row label="Referrer"   value={v.external_referrer_url}                 color={T.blue} />
         <Row label="Duration"   value={fmtDur(v.visit_duration_us)} />
         <Row label="Source"     value={v.visit_source} />
         <Sep title="Sync" />
         <Row label="Synced"     value={v.is_known_to_sync ? "YES" : "no"} color={v.is_known_to_sync ? T.green : T.t2} />
-        <Row label="Orig GUID"  value={v.originator_cache_guid} color={T.t2} />
+        <Row label="Orig GUID"  value={v.originator_cache_guid}           color={T.t2} />
         <Row label="Orig Visit" value={String(v.originator_visit_id || "—")} />
         <Row label="App ID"     value={v.app_id} color={T.t1} />
         {Object.keys(ctx).length > 0 && <>
           <Sep title="Context" />
-          <Row label="HTTP"       value={http || "—"}                                          color={httpColor} />
+          <Row label="HTTP"       value={http || "—"}                                             color={httpColor} />
           <Row label="Win/Tab"    value={`${ctx.window_id} / ${ctx.tab_id}`} />
           <Row label="Tasks"      value={`${ctx.task_id}→${ctx.root_task_id}→${ctx.parent_task_id}`} color={T.t2} />
           <Row label="FG Dur"     value={fmtDur(ctx.total_foreground_duration_us)} />
@@ -348,7 +321,7 @@ function DetailPanelContent({ item, type }) {
         {cnt.search_terms && <>
           <Sep title="Content" />
           <Row label="Search"     value={cnt.search_terms}          color={T.amber} />
-          <Row label="S.URL"      value={cnt.search_normalized_url} color={T.cyan} />
+          <Row label="S.URL"      value={cnt.search_normalized_url} color={T.blue} />
           <Row label="Lang"       value={cnt.page_language} />
           <Row label="Password"   value={String(cnt.password_state || 0)} color={cnt.password_state > 0 ? T.red : T.t2} />
           <Row label="Entities"   value={cnt.entities}   color={T.t1} />
@@ -359,98 +332,69 @@ function DetailPanelContent({ item, type }) {
   }
 
   if (type === "download") {
-    const dl     = item
-    const danger = dl.danger_type || "NOT_DANGEROUS"
-    const safe   = danger === "NOT_DANGEROUS" || danger === "USER_VALIDATED"
+    const dl = item
     return (
       <div style={{ padding: "14px 16px" }}>
-        <Row label="File"      value={dl.target_path?.split(/[\\\/]/).pop()} color={T.t0} />
-        <Row label="Path"      value={dl.target_path}   color={T.t1} />
+        <Row label="File"      value={dl.target_path?.split(/[\\\/]/).pop()} />
+        <Row label="Path"      value={dl.target_path} color={T.t1} />
         <Row label="State"     value={dl.state}
              color={dl.state === "COMPLETE" ? T.green : dl.state === "INTERRUPTED" ? T.red : T.amber} />
-        <Sep title="Risk" />
-        <Row label="Danger"    value={danger} color={safe ? T.green : T.red} />
+        <Sep title="File Info" />
         <Row label="MIME"      value={dl.mime_type} />
         <Row label="Orig MIME" value={dl.original_mime_type} color={T.t1} />
         <Row label="Hash"      value={dl.file_hash_hex?.slice(0, 40)} color={T.t2} />
         <Sep title="Timing" />
-        <Row label="Start IST" value={tIST(dl.start_time)} />
-        <Row label="Start UTC" value={tUTC(dl.start_time)} color={T.t1} />
-        <Row label="End IST"   value={tIST(dl.end_time)} />
-        <Row label="End UTC"   value={tUTC(dl.end_time)}   color={T.t1} />
+        <Row label="Start IST" value={tIST(dl.start_time)} color={tz === "ist" ? T.t0 : T.t1} />
+        <Row label="Start UTC" value={tUTC(dl.start_time)} color={tz === "utc" ? T.t0 : T.t1} />
+        <Row label="End IST"   value={tIST(dl.end_time)}   color={tz === "ist" ? T.t0 : T.t1} />
+        <Row label="End UTC"   value={tUTC(dl.end_time)}   color={tz === "utc" ? T.t0 : T.t1} />
         <Row label="Size"      value={`${fmtBytes(dl.received_bytes)} / ${fmtBytes(dl.total_bytes)}`} />
         <Sep title="Attribution" />
-        <Row label="Site URL"  value={dl.site_url}  color={T.cyan} />
-        <Row label="Tab URL"   value={dl.tab_url}   color={T.cyan} />
-        <Row label="Referrer"  value={dl.referrer}  color={T.cyan} />
+        <Row label="Site URL"  value={dl.site_url}  color={T.blue} />
+        <Row label="Tab URL"   value={dl.tab_url}   color={T.blue} />
+        <Row label="Referrer"  value={dl.referrer}  color={T.blue} />
         <Row label="Method"    value={dl.http_method} />
         <Row label="By Ext"    value={`${dl.by_extension_name || "—"} (${dl.by_extension_id || "—"})`} />
         <Row label="ETag"      value={dl.etag} color={T.t2} />
         {dl.url_chain?.length > 0 && <>
           <Sep title="URL Chain" />
-          {dl.url_chain.map(c => <Row key={c.index} label={`[${c.index}]`} value={c.url} color={T.cyan} />)}
+          {dl.url_chain.map(c => <Row key={c.index} label={`[${c.index}]`} value={c.url} color={T.blue} />)}
         </>}
       </div>
     )
   }
-
   return null
 }
 
 /* ═══════════════════════════════════════════════════════════
-   SLIDE PANEL  — drawer from right
-   FIX 6: onClose stored in a ref so the keydown useEffect has a
-          stable dependency. Previously onClose (defined inline as
-          () => setSel(null)) was a new reference every render,
-          causing the effect to detach and re-attach the keydown
-          listener on every parent render — benign but wasteful,
-          and a latent infinite-loop risk if onClose ever triggered
-          state that caused re-renders in a tight cycle.
+   SLIDE PANEL
 ═══════════════════════════════════════════════════════════ */
-function SlidePanel({ item, type, onClose }) {
+function SlidePanel({ item, type, tz, onClose }) {
   const open = !!item
-
   const onCloseRef = useRef(onClose)
-  useEffect(() => { onCloseRef.current = onClose })  // always up-to-date
-
+  useEffect(() => { onCloseRef.current = onClose })
   useEffect(() => {
     if (!open) return
-    const handler = e => { if (e.key === "Escape") onCloseRef.current() }
-    window.addEventListener("keydown", handler)
-    return () => window.removeEventListener("keydown", handler)
-  }, [open])  // ← stable: only re-runs when panel opens/closes
-
-  const typeLabel = type === "visit" ? "VISIT DETAIL" : "DOWNLOAD DETAIL"
+    const h = e => { if (e.key === "Escape") onCloseRef.current() }
+    window.addEventListener("keydown", h)
+    return () => window.removeEventListener("keydown", h)
+  }, [open])
 
   return (
     <>
-      {/* Backdrop */}
-      <div
-        onClick={onClose}
-        style={{
-          position: "fixed", inset: 0,
-          background: "rgba(0,0,0,0.45)",
-          zIndex: 50,
-          opacity: open ? 1 : 0,
-          pointerEvents: open ? "auto" : "none",
-          transition: "opacity 0.22s ease",
-        }}
-      />
-
-      {/* Drawer */}
+      <div onClick={onClose} style={{
+        position: "fixed", inset: 0, background: "rgba(0,5,20,0.55)", zIndex: 50,
+        opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none",
+        transition: "opacity 0.2s ease",
+      }} />
       <div style={{
-        position: "fixed", right: 0, top: 0, bottom: 0,
-        width: 360,
-        background: T.panel,
-        borderLeft: `1px solid ${T.border2}`,
-        zIndex: 51,
-        display: "flex", flexDirection: "column",
+        position: "fixed", right: 0, top: 0, bottom: 0, width: 360,
+        background: T.panel, borderLeft: `1px solid ${T.border2}`,
+        zIndex: 51, display: "flex", flexDirection: "column",
         transform: open ? "translateX(0)" : "translateX(100%)",
-        transition: "transform 0.24s cubic-bezier(0.4, 0, 0.2, 1)",
-        boxShadow: open ? "-12px 0 48px rgba(0,0,0,0.6)" : "none",
+        transition: "transform 0.24s cubic-bezier(0.4,0,0.2,1)",
+        boxShadow: open ? "-8px 0 40px rgba(0,5,20,0.7)" : "none",
       }}>
-
-        {/* Header */}
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "10px 14px", borderBottom: `1px solid ${T.border}`,
@@ -458,44 +402,32 @@ function SlidePanel({ item, type, onClose }) {
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ width: 2, height: 12, background: T.blue, borderRadius: 2 }} />
-            <span style={{
-              fontSize: 9, fontFamily: MONO, color: T.blue,
-              fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.4
-            }}>{typeLabel}</span>
+            <span style={{ fontSize: 9, fontFamily: MONO, color: T.blue, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1.4 }}>
+              {type === "visit" ? "Visit Detail" : "Download Detail"}
+            </span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>ESC to close</span>
-            <button
-              onClick={onClose}
-              title="Close panel"
-              style={{
-                background: T.card, border: `1px solid ${T.border}`,
-                borderRadius: 5, cursor: "pointer", color: T.t1,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 26, height: 26, transition: "all .1s",
-              }}
+            <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>ESC</span>
+            <button onClick={onClose} style={{
+              background: T.card, border: `1px solid ${T.border}`, borderRadius: 4,
+              cursor: "pointer", color: T.t1,
+              display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26,
+            }}
               onMouseEnter={e => { e.currentTarget.style.background = T.hover; e.currentTarget.style.color = T.t0 }}
               onMouseLeave={e => { e.currentTarget.style.background = T.card;  e.currentTarget.style.color = T.t1 }}
-            >
-              <X size={13} />
-            </button>
+            ><X size={13} /></button>
           </div>
         </div>
-
-        {/* Scrollable content */}
         <div style={{ flex: 1, overflow: "auto" }}>
-          <DetailPanelContent item={item} type={type} />
+          <DetailPanelContent item={item} type={type} tz={tz} />
         </div>
-
-        {/* Footer */}
         {item && (
           <div style={{
             padding: "6px 14px", borderTop: `1px solid ${T.border}`,
             fontSize: 9, fontFamily: MONO, color: T.t3, flexShrink: 0,
-            display: "flex", alignItems: "center", gap: 6
+            display: "flex", alignItems: "center", gap: 5,
           }}>
-            <PanelRightClose size={9} />
-            Click backdrop or press ESC to close
+            <PanelRightClose size={9} /> Click backdrop or ESC to close
           </div>
         )}
       </div>
@@ -506,7 +438,7 @@ function SlidePanel({ item, type, onClose }) {
 /* ═══════════════════════════════════════════════════════════
    PAGE: BROWSE TREE
 ═══════════════════════════════════════════════════════════ */
-function PageTree({ byId, childrenMap, rootIds, filter }) {
+function PageTree({ byId, childrenMap, rootIds, filter, tz }) {
   const [open, setOpen] = useState(new Set())
   const [sel,  setSel]  = useState(null)
   const [cols, setCols] = useState({ url: 440, time: 145, trans: 115, dur: 72, src: 70, tab: 45 })
@@ -518,18 +450,10 @@ function PageTree({ byId, childrenMap, rootIds, filter }) {
   )
 
   const toggle = useCallback(id => {
-    setOpen(prev => {
-      const n = new Set(prev)
-      n.has(id) ? n.delete(id) : n.add(id)
-      return n
-    })
+    setOpen(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   }, [])
 
-  const expandAll = () => {
-    const s = new Set()
-    Object.keys(childrenMap).forEach(k => s.add(Number(k)))
-    setOpen(s)
-  }
+  const expandAll   = () => { const s = new Set(); Object.keys(childrenMap).forEach(k => s.add(Number(k))); setOpen(s) }
   const collapseAll = () => setOpen(new Set())
   const expandDepth = max => {
     const add = new Set()
@@ -548,55 +472,47 @@ function PageTree({ byId, childrenMap, rootIds, filter }) {
     <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-        {/* Toolbar */}
+        {/* Toolbar row */}
         <div style={{
-          display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
-          background: T.panel, borderBottom: `1px solid ${T.border}`, flexShrink: 0
+          display: "flex", alignItems: "center", gap: 6, padding: "7px 14px",
+          background: T.surf, borderBottom: `1px solid ${T.border}`, flexShrink: 0
         }}>
           {[
-            ["Expand All",   expandAll],
-            ["Collapse All", collapseAll],
-            ["Depth 1",      () => expandDepth(1)],
-            ["Depth 2",      () => expandDepth(2)],
-            ["Depth 3",      () => expandDepth(3)],
+            ["Expand All",  expandAll],
+            ["Collapse",    collapseAll],
+            ["Depth 1",     () => expandDepth(1)],
+            ["Depth 2",     () => expandDepth(2)],
+            ["Depth 3",     () => expandDepth(3)],
           ].map(([t, fn]) => (
             <button key={t} onClick={fn} style={{
-              padding: "4px 10px", background: T.card,
+              padding: "3px 9px", background: T.card,
               border: `1px solid ${T.border2}`, color: T.t0,
-              fontSize: 10, fontFamily: MONO, borderRadius: 4, cursor: "pointer"
+              fontSize: 10, fontFamily: MONO, borderRadius: 3, cursor: "pointer"
             }}>{t}</button>
           ))}
+
+          {/* Compact transition legend */}
+          <div style={{ marginLeft: 10, display: "flex", alignItems: "center", gap: 10, borderLeft: `1px solid ${T.border}`, paddingLeft: 10 }}>
+            {Object.entries({ TYPED: TC.TYPED, LINK: TC.LINK, FORM: TC.FORM_SUBMIT, RELOAD: TC.RELOAD, KW: TC.KEYWORD }).map(([k, c]) => (
+              <span key={k} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9, fontFamily: MONO, color: c }}>
+                <span style={{ width: 5, height: 5, borderRadius: 1, background: c, display: "inline-block", flexShrink: 0 }} />
+                {k}
+              </span>
+            ))}
+          </div>
+
           <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: MONO, color: T.t2 }}>
             {flat.length.toLocaleString()} nodes
           </span>
         </div>
 
-        {/* Legend */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 14, padding: "5px 14px",
-          background: T.surf, borderBottom: `1px solid ${T.border}`, flexShrink: 0
-        }}>
-          {Object.entries({
-            TYPED: TC.TYPED, LINK: TC.LINK, FORM: TC.FORM_SUBMIT,
-            RELOAD: TC.RELOAD, KW: TC.KEYWORD, SYNC: T.purple
-          }).map(([k, c]) => (
-            <span key={k} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9, fontFamily: MONO, color: c }}>
-              <span style={{ width: 6, height: 6, borderRadius: 2, background: c, display: "inline-block" }} />
-              {k}
-            </span>
-          ))}
-          <span style={{ marginLeft: "auto", fontSize: 9, fontFamily: MONO, color: T.t3 }}>
-            dimmed row = context ancestor
-          </span>
-        </div>
-
-        {/* Tree list */}
+        {/* Tree table */}
         <div style={{ flex: 1, overflow: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <thead>
               <tr>
                 <TH width={cols.url}   onResize={rz("url")}>URL / Navigation Chain</TH>
-                <TH width={cols.time}  onResize={rz("time")}>Time (IST)</TH>
+                <TH width={cols.time}  onResize={rz("time")}>Time ({tz.toUpperCase()})</TH>
                 <TH width={cols.trans} onResize={rz("trans")}>Transition</TH>
                 <TH width={cols.dur}   onResize={rz("dur")}>Duration</TH>
                 <TH width={cols.src}   onResize={rz("src")}>Source</TH>
@@ -606,20 +522,14 @@ function PageTree({ byId, childrenMap, rootIds, filter }) {
             </thead>
             <tbody>
               {flat.map(({ id, depth, hasKids, open: isOpen, dimmed }) => {
-                const v   = byId[id]; if (!v) return null
+                const v = byId[id]; if (!v) return null
                 const tr  = v.transition || {}
                 const ctx = v.context    || {}
                 const isSel = sel === id
                 const tc    = TC[tr.core_type]
                 return (
-                  <tr
-                    key={id}
-                    onClick={() => setSel(id)}
-                    style={{
-                      background: isSel ? T.sel : "transparent",
-                      cursor: "pointer",
-                      opacity: dimmed ? 0.35 : 1,
-                    }}
+                  <tr key={id} onClick={() => setSel(id)}
+                    style={{ background: isSel ? T.sel : "transparent", cursor: "pointer", opacity: dimmed ? 0.28 : 1 }}
                     onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = T.hover }}
                     onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = "transparent" }}
                   >
@@ -628,23 +538,19 @@ function PageTree({ byId, childrenMap, rootIds, filter }) {
                         <span
                           onClick={e => { e.stopPropagation(); toggle(id) }}
                           style={{
-                            width: 18, height: 18, display: "flex", alignItems: "center",
+                            width: 26, height: 26, display: "flex", alignItems: "center",
                             justifyContent: "center", cursor: hasKids ? "pointer" : "default",
-                            flexShrink: 0, borderRadius: 3,
+                            flexShrink: 0, borderRadius: 4,
                             background: hasKids ? `${T.blue}14` : "transparent",
-                            border: hasKids ? `1px solid ${T.blue}28` : "1px solid transparent",
-                            transition: "background .12s, border-color .12s",
+                            border: hasKids ? `1px solid ${T.blue}30` : "1px solid transparent",
                             color: isOpen ? T.blue : T.t1,
                           }}
                           onMouseEnter={e => { if (hasKids) e.currentTarget.style.background = `${T.blue}28` }}
                           onMouseLeave={e => { if (hasKids) e.currentTarget.style.background = hasKids ? `${T.blue}14` : "transparent" }}
                         >
                           {hasKids
-                            ? (isOpen
-                                ? <ChevronDown  size={13} strokeWidth={2.2} />
-                                : <ChevronRight size={13} strokeWidth={2.2} />)
-                            : <span style={{ width: 13 }} />
-                          }
+                            ? (isOpen ? <ChevronDown size={17} strokeWidth={2.2} /> : <ChevronRight size={17} strokeWidth={2.2} />)
+                            : <span style={{ width: 17 }} />}
                         </span>
                         <span style={{
                           fontSize: 11, fontFamily: MONO, color: tc || T.t0,
@@ -655,7 +561,7 @@ function PageTree({ byId, childrenMap, rootIds, filter }) {
                         </span>
                       </div>
                     </td>
-                    <TD color={T.t1}>{tIST(v.visit_time)}</TD>
+                    <TD color={T.t1}>{tShow(v.visit_time, tz)}</TD>
                     <TD>{tr.core_type && <Badge text={tr.core_type} color={tc || T.t1} />}</TD>
                     <TD color={T.t1}>{fmtDur(v.visit_duration_us)}</TD>
                     <TD color={T.t2}>{v.visit_source}</TD>
@@ -668,25 +574,19 @@ function PageTree({ byId, childrenMap, rootIds, filter }) {
           </table>
         </div>
       </div>
-
-      <SlidePanel item={selVisit} type="visit" onClose={() => setSel(null)} />
+      <SlidePanel item={selVisit} type="visit" tz={tz} onClose={() => setSel(null)} />
     </div>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════
    PAGE: TIMELINE
-   FIX 3 (sort) + FIX 5 (pagination blank table):
-   - Time column now sorts correctly via useSort's type-aware comparator.
-   - useEffect resets page to 0 whenever filter or sort state changes so
-     the current page index never exceeds the new result count.
-   NEW: Time cell shows both IST (primary) and UTC (secondary dimmed line).
 ═══════════════════════════════════════════════════════════ */
-function PageTimeline({ data, byId, filter }) {
+function PageTimeline({ data, byId, filter, tz }) {
   const [sel,  setSel]  = useState(null)
   const [page, setPage] = useState(0)
-  const [cols, setCols] = useState({ time: 180, domain: 160, title: 190, trans: 115, dur: 72, http: 46, tab: 46 })
-  const rz = key => w => setCols(c => ({ ...c, [key]: w }))
+  const [cols, setCols] = useState({ time: 182, domain: 160, title: 190, trans: 115, dur: 72, http: 46, tab: 46 })
+  const rz  = key => w => setCols(c => ({ ...c, [key]: w }))
   const PER = 200
 
   const visits = useMemo(() => {
@@ -698,23 +598,17 @@ function PageTimeline({ data, byId, filter }) {
 
   const { sorted, col, asc, toggle } = useSort(visits, null)
 
-  // FIX 5: Reset page whenever filter or sort changes.
-  //         Without this, staying on e.g. page 5 after applying a tight filter
-  //         produces an empty slice (page 5 of 1-page results = nothing shown).
+  // Reset page on filter/sort change to avoid empty slice
   useEffect(() => { setPage(0) }, [filter, col, asc])
 
-  const pages     = Math.ceil(sorted.length / PER) || 1
-  const page_data = sorted.slice(page * PER, (page + 1) * PER)
-  const selVisit  = byId[sel]
+  const pages    = Math.ceil(sorted.length / PER) || 1
+  const pageData = sorted.slice(page * PER, (page + 1) * PER)
+  const selVisit = byId[sel]
 
   const hdr = (label, field, colKey) => (
-    <TH
-      key={label}
-      width={cols[colKey]}
-      onResize={rz(colKey)}
-      onClick={() => toggle(field)}
-      sorted={col === field ? (asc ? "asc" : "desc") : undefined}
-    >
+    <TH key={label} width={cols[colKey]} onResize={rz(colKey)}
+        onClick={() => toggle(field)}
+        sorted={col === field ? (asc ? "asc" : "desc") : undefined}>
       {label}
     </TH>
   )
@@ -723,10 +617,9 @@ function PageTimeline({ data, byId, filter }) {
     <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-        {/* Toolbar */}
         <div style={{
           display: "flex", alignItems: "center", gap: 8, padding: "7px 14px",
-          background: T.panel, borderBottom: `1px solid ${T.border}`, flexShrink: 0
+          background: T.surf, borderBottom: `1px solid ${T.border}`, flexShrink: 0
         }}>
           <span style={{ fontSize: 10, fontFamily: MONO, color: T.t2 }}>
             {sorted.length.toLocaleString()} visits
@@ -736,34 +629,24 @@ function PageTimeline({ data, byId, filter }) {
             Page {page + 1} / {pages}
           </span>
           <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
-            <button
-              onClick={() => setPage(p => Math.max(0, p - 1))}
-              disabled={page === 0}
-              style={{
-                padding: "3px 9px", background: T.card, border: `1px solid ${T.border2}`,
+            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
+              style={{ padding: "3px 9px", background: T.card, border: `1px solid ${T.border2}`,
                 color: page === 0 ? T.t3 : T.t0, fontSize: 10, fontFamily: MONO,
-                borderRadius: 3, cursor: page === 0 ? "not-allowed" : "pointer"
-              }}>←</button>
-            <button
-              onClick={() => setPage(p => Math.min(pages - 1, p + 1))}
-              disabled={page >= pages - 1}
-              style={{
-                padding: "3px 9px", background: T.card, border: `1px solid ${T.border2}`,
+                borderRadius: 3, cursor: page === 0 ? "not-allowed" : "pointer" }}>←</button>
+            <button onClick={() => setPage(p => Math.min(pages - 1, p + 1))} disabled={page >= pages - 1}
+              style={{ padding: "3px 9px", background: T.card, border: `1px solid ${T.border2}`,
                 color: page >= pages - 1 ? T.t3 : T.t0, fontSize: 10, fontFamily: MONO,
-                borderRadius: 3, cursor: page >= pages - 1 ? "not-allowed" : "pointer"
-              }}>→</button>
+                borderRadius: 3, cursor: page >= pages - 1 ? "not-allowed" : "pointer" }}>→</button>
           </div>
         </div>
 
-        {/* Table */}
         <div style={{ flex: 1, overflow: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <thead>
               <tr>
-                {/* Time column header — sortable, shows "IST / UTC" label */}
-                {hdr("Time (IST / UTC)", "visit_time", "time")}
-                {hdr("Domain",           "url",        "domain")}
-                {hdr("Title",            "title",      "title")}
+                {hdr(`Time (${tz.toUpperCase()})`, "visit_time", "time")}
+                {hdr("Domain",                      "url",        "domain")}
+                {hdr("Title",                       "title",      "title")}
                 <TH width={cols.trans} onResize={rz("trans")}>Transition</TH>
                 <TH width={cols.dur}   onResize={rz("dur")}>Duration</TH>
                 <TH width={cols.http}  onResize={rz("http")}>HTTP</TH>
@@ -772,7 +655,7 @@ function PageTimeline({ data, byId, filter }) {
               </tr>
             </thead>
             <tbody>
-              {page_data.map((v, i) => {
+              {pageData.map((v, i) => {
                 const tr    = v.transition || {}
                 const ctx   = v.context    || {}
                 const isSel = sel === v.visit_id
@@ -781,26 +664,15 @@ function PageTimeline({ data, byId, filter }) {
                 const hc    = http.startsWith("4") || http.startsWith("5") ? T.red
                             : http === "200" ? T.green : T.t1
                 return (
-                  <tr
-                    key={v.visit_id}
-                    onClick={() => setSel(v.visit_id)}
-                    style={{ background: isSel ? T.sel : i % 2 === 0 ? "transparent" : T.surf, cursor: "pointer" }}
+                  <tr key={v.visit_id} onClick={() => setSel(v.visit_id)}
+                    style={{ background: isSel ? T.sel : i % 2 === 0 ? "transparent" : `${T.surf}70`, cursor: "pointer" }}
                     onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = T.hover }}
-                    onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = i % 2 === 0 ? "transparent" : T.surf }}
+                    onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = i % 2 === 0 ? "transparent" : `${T.surf}70` }}
                   >
-                    {/* IST + UTC two-line time cell (not using <TD> so we can wrap) */}
-                    <td style={{
-                      padding: "5px 10px",
-                      borderBottom: `1px solid ${T.border}`,
-                      fontFamily: MONO,
-                      whiteSpace: "nowrap",
-                    }}>
-                      <div style={{ fontSize: 11, color: T.t1, lineHeight: 1.3 }}>
-                        {tIST(v.visit_time)}
-                      </div>
-                      <div style={{ fontSize: 9, color: T.t3, lineHeight: 1.3, marginTop: 2 }}>
-                        {tUTC(v.visit_time)}
-                      </div>
+                    {/* Two-line time cell: primary tz prominent, secondary small */}
+                    <td style={{ padding: "4px 10px", borderBottom: `1px solid ${T.border}`, fontFamily: MONO, whiteSpace: "nowrap" }}>
+                      <div style={{ fontSize: 11, color: T.t0, lineHeight: 1.3 }}>{tShow(v.visit_time, tz)}</div>
+                      <div style={{ fontSize: 9,  color: T.t3, lineHeight: 1.3, marginTop: 1 }}>{tAlt(v.visit_time, tz)}</div>
                     </td>
                     <TD color={tc || T.t0}>{dom(v.url)}</TD>
                     <TD color={T.t1} truncate>{v.title}</TD>
@@ -816,18 +688,17 @@ function PageTimeline({ data, byId, filter }) {
           </table>
         </div>
       </div>
-
-      <SlidePanel item={selVisit} type="visit" onClose={() => setSel(null)} />
+      <SlidePanel item={selVisit} type="visit" tz={tz} onClose={() => setSel(null)} />
     </div>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════
-   PAGE: DOWNLOADS
+   PAGE: DOWNLOADS  — no verdict / flagged columns
 ═══════════════════════════════════════════════════════════ */
-function PageDownloads({ data, filter }) {
+function PageDownloads({ data, filter, tz }) {
   const [sel,  setSel]  = useState(null)
-  const [cols, setCols] = useState({ time: 145, file: 220, size: 76, state: 95, mime: 140, domain: 180 })
+  const [cols, setCols] = useState({ time: 145, file: 220, size: 76, state: 95, mime: 160 })
   const rz = key => w => setCols(c => ({ ...c, [key]: w }))
 
   const dls = useMemo(() => {
@@ -846,56 +717,43 @@ function PageDownloads({ data, filter }) {
     <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-        {/* Toolbar */}
         <div style={{
-          padding: "7px 14px", background: T.panel,
+          padding: "7px 14px", background: T.surf,
           borderBottom: `1px solid ${T.border}`, flexShrink: 0,
           fontSize: 10, fontFamily: MONO, color: T.t2,
-          display: "flex", alignItems: "center", gap: 10
+          display: "flex", alignItems: "center",
         }}>
-          <span>{dls.length} downloads</span>
-          {dls.some(d => !["NOT_DANGEROUS", "USER_VALIDATED"].includes(d.danger_type)) && (
-            <span style={{ color: T.red, display: "flex", alignItems: "center", gap: 4 }}>
-              <AlertTriangle size={10} />
-              {dls.filter(d => !["NOT_DANGEROUS", "USER_VALIDATED"].includes(d.danger_type)).length} flagged
-            </span>
-          )}
+          <span>{dls.length.toLocaleString()} downloads</span>
         </div>
 
-        {/* Table */}
         <div style={{ flex: 1, overflow: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <TH width={cols.time}   onResize={rz("time")}>Start Time</TH>
-                <TH width={cols.file}   onResize={rz("file")}>Filename</TH>
-                <TH width={cols.size}   onResize={rz("size")}>Size</TH>
-                <TH width={cols.state}  onResize={rz("state")}>State</TH>
-                <TH width={cols.mime}   onResize={rz("mime")}>MIME</TH>
-                <TH width={cols.domain} onResize={rz("domain")}>Domain</TH>
+                <TH width={cols.time}  onResize={rz("time")}>Start ({tz.toUpperCase()})</TH>
+                <TH width={cols.file}  onResize={rz("file")}>Filename</TH>
+                <TH width={cols.size}  onResize={rz("size")}>Size</TH>
+                <TH width={cols.state} onResize={rz("state")}>State</TH>
+                <TH width={cols.mime}  onResize={rz("mime")}>MIME</TH>
                 <TH>Referrer</TH>
               </tr>
             </thead>
             <tbody>
               {dls.map((dl, i) => {
                 const isSel = sel === dl.download_id
-                const sc    = dl.state === "COMPLETE" ? T.green
-                            : dl.state === "INTERRUPTED" ? T.red : T.amber
+                const sc    = dl.state === "COMPLETE" ? T.green : dl.state === "INTERRUPTED" ? T.red : T.amber
                 const fname = dl.target_path?.split(/[\\\/]/).pop() || "—"
                 return (
-                  <tr
-                    key={dl.download_id}
-                    onClick={() => setSel(dl.download_id)}
-                    style={{ background: isSel ? T.sel : i % 2 === 0 ? "transparent" : T.surf, cursor: "pointer" }}
+                  <tr key={dl.download_id} onClick={() => setSel(dl.download_id)}
+                    style={{ background: isSel ? T.sel : i % 2 === 0 ? "transparent" : `${T.surf}70`, cursor: "pointer" }}
                     onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = T.hover }}
-                    onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = i % 2 === 0 ? "transparent" : T.surf }}
+                    onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = i % 2 === 0 ? "transparent" : `${T.surf}70` }}
                   >
-                    <TD color={T.t1}>{tIST(dl.start_time)}</TD>
+                    <TD color={T.t1}>{tShow(dl.start_time, tz)}</TD>
                     <TD color={T.t0}>{fname}</TD>
                     <TD color={T.t1}>{fmtBytes(dl.total_bytes || dl.received_bytes)}</TD>
                     <TD color={sc}>{dl.state}</TD>
                     <TD color={T.t1}>{dl.mime_type}</TD>
-                    <TD color={T.t1}>{dom(dl.site_url || "")}</TD>
                     <TD color={T.t2} truncate>{dl.referrer}</TD>
                   </tr>
                 )
@@ -904,14 +762,13 @@ function PageDownloads({ data, filter }) {
           </table>
         </div>
       </div>
-
-      <SlidePanel item={selDl} type="download" onClose={() => setSel(null)} />
+      <SlidePanel item={selDl} type="download" tz={tz} onClose={() => setSel(null)} />
     </div>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════
-   TIME FILTER PICKER  — compact, minimal
+   TIME FILTER PICKER
 ═══════════════════════════════════════════════════════════ */
 const PRESETS = [
   { label: "6h",  hours: 6   },
@@ -923,85 +780,50 @@ const PRESETS = [
 ]
 
 function TimeFilterPicker({ days, setDays, hoursExtra, setHoursExtra, allTime, setAllTime }) {
-  const applyPreset = hours => {
-    if (hours === null) { setAllTime(true); return }
-    setAllTime(false)
-    setDays(Math.floor(hours / 24))
-    setHoursExtra(hours % 24)
+  const applyPreset = h => {
+    if (h === null) { setAllTime(true); return }
+    setAllTime(false); setDays(Math.floor(h / 24)); setHoursExtra(h % 24)
   }
-
-  const numInput = {
-    width: 48, padding: "4px 6px",
-    background: "transparent",
-    border: `1px solid ${T.border}`,
-    borderRadius: 3, color: allTime ? T.t3 : T.t0,
-    fontSize: 11, fontFamily: MONO,
+  const num = {
+    width: 44, padding: "3px 5px", background: "transparent",
+    border: `1px solid ${T.border}`, borderRadius: 3,
+    color: allTime ? T.t2 : T.t0, fontSize: 11, fontFamily: MONO,
     textAlign: "center", outline: "none",
-    transition: "color .12s",
   }
-
   return (
     <div>
-      {/* Preset chips */}
       <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
         {PRESETS.map(p => {
-          const isActive = p.hours === null
-            ? allTime
-            : !allTime && (days * 24 + hoursExtra) === p.hours
+          const on = p.hours === null ? allTime : !allTime && (days * 24 + hoursExtra) === p.hours
           return (
-            <button
-              key={p.label}
-              onClick={() => applyPreset(p.hours)}
-              style={{
-                padding: "3px 10px",
-                fontSize: 10, fontFamily: MONO,
-                background: isActive ? `${T.blue}1a` : "transparent",
-                border: `1px solid ${isActive ? T.blue : T.border}`,
-                color: isActive ? T.blue : T.t2,
-                borderRadius: 3, cursor: "pointer",
-                transition: "all .1s",
-              }}
-              onMouseEnter={e => { if (!isActive) { e.currentTarget.style.borderColor = T.blue; e.currentTarget.style.color = T.t1 } }}
-              onMouseLeave={e => { if (!isActive) { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.t2 } }}
-            >
-              {p.label}
-            </button>
+            <button key={p.label} onClick={() => applyPreset(p.hours)} style={{
+              padding: "3px 10px", fontSize: 10, fontFamily: MONO,
+              background: on ? `${T.blue}20` : "transparent",
+              border: `1px solid ${on ? T.blue : T.border}`,
+              color: on ? T.blue : T.t2, borderRadius: 3, cursor: "pointer", transition: "all .1s",
+            }}
+              onMouseEnter={e => { if (!on) { e.currentTarget.style.borderColor = T.blue; e.currentTarget.style.color = T.t1 } }}
+              onMouseLeave={e => { if (!on) { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.t2 } }}
+            >{p.label}</button>
           )
         })}
       </div>
-
-      {/* Manual inputs */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 7,
-        opacity: allTime ? 0.35 : 1, transition: "opacity .15s"
-      }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, opacity: allTime ? 0.3 : 1, transition: "opacity .15s" }}>
         <span style={{ fontSize: 10, fontFamily: MONO, color: T.t2 }}>Last</span>
-        <input
-          type="number" min={0} max={3650} value={days}
-          onChange={e => { setAllTime(false); setDays(Math.max(0, parseInt(e.target.value) || 0)) }}
-          style={numInput}
-        />
+        <input type="number" min={0} max={3650} value={days} style={num}
+          onChange={e => { setAllTime(false); setDays(Math.max(0, parseInt(e.target.value) || 0)) }} />
         <span style={{ fontSize: 10, fontFamily: MONO, color: T.t2 }}>d</span>
-        <input
-          type="number" min={0} max={23} value={hoursExtra}
-          onChange={e => { setAllTime(false); setHoursExtra(Math.min(23, Math.max(0, parseInt(e.target.value) || 0))) }}
-          style={numInput}
-        />
+        <input type="number" min={0} max={23} value={hoursExtra} style={num}
+          onChange={e => { setAllTime(false); setHoursExtra(Math.min(23, Math.max(0, parseInt(e.target.value) || 0))) }} />
         <span style={{ fontSize: 10, fontFamily: MONO, color: T.t2 }}>h</span>
-        {!allTime && (
-          <span style={{ fontSize: 10, fontFamily: MONO, color: T.t3, marginLeft: 4 }}>
-            = {days * 24 + hoursExtra}h total
-          </span>
-        )}
+        {!allTime && <span style={{ fontSize: 10, fontFamily: MONO, color: T.t3, marginLeft: 4 }}>= {days * 24 + hoursExtra}h</span>}
       </div>
     </div>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════
-   DROP ZONE — revamped: clean, minimal, single contained card
-   FIX 7: totalHours computed inside upload() at call time so it
-          always reads the latest state, safe against future memoization.
+   DROP ZONE  — clean minimal upload screen
 ═══════════════════════════════════════════════════════════ */
 function DropZone({ onLoad }) {
   const [drag,       setDrag]       = useState(false)
@@ -1013,19 +835,13 @@ function DropZone({ onLoad }) {
   const ref = useRef()
 
   const upload = async file => {
-    // FIX 7: read state at call time, not from outer closure
+    // Compute totalHours at call time (FIX 7: avoids stale closure)
     const totalHours = allTime ? null : (days * 24 + hoursExtra)
-    setLoading(true)
-    setError(null)
+    setLoading(true); setError(null)
     try {
       const buffer = await file.arrayBuffer()
-      const json   = await parseHistory({
-        fileBuffer: buffer,
-        browser:    "Unknown",
-        profile:    "Default",
-        hours:      totalHours,
-      })
-      if (!json.visits) throw new Error("Missing visits field — is this a valid Chromium History file?")
+      const json   = await parseHistory({ fileBuffer: buffer, browser: "Unknown", profile: "Default", hours: totalHours })
+      if (!json.visits) throw new Error("Missing visits — is this a valid Chromium History SQLite file?")
       onLoad(json)
     } catch (err) {
       setError(err.message)
@@ -1041,82 +857,82 @@ function DropZone({ onLoad }) {
       flex: 1, display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center",
       background: T.bg,
+      backgroundImage: `radial-gradient(ellipse 55% 40% at 50% 52%, ${T.surf}cc 0%, transparent 75%)`,
     }}>
 
-      {/* Logo mark */}
-      <div style={{
-        display: "flex", alignItems: "center", gap: 10, marginBottom: 32,
-      }}>
+      {/* Wordmark */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 32 }}>
         <div style={{
-          width: 30, height: 30, borderRadius: 7,
-          background: T.panel, border: `1px solid ${T.border2}`,
+          width: 32, height: 32, borderRadius: 8,
+          background: `${T.blue}16`, border: `1px solid ${T.blue}40`,
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>
-          <Shield size={13} color={T.blue} strokeWidth={1.5} />
+          <Shield size={14} color={T.blue} strokeWidth={1.8} />
         </div>
         <div>
-          <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, letterSpacing: .3 }}>SecOps</div>
-          <div style={{ fontSize: 9, fontFamily: MONO, color: T.t3, letterSpacing: 1.4, textTransform: "uppercase", marginTop: 1 }}>
-            Forensic History Analyzer
+          <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, letterSpacing: .4 }}>
+            SecOps Browser History Analyzer
+          </div>
+          <div style={{ fontSize: 9, fontFamily: MONO, color: T.t2, letterSpacing: 1.3, textTransform: "uppercase", marginTop: 2 }}>
+            Chromium Forensic Viewer
           </div>
         </div>
       </div>
 
-      {/* Main card */}
+      {/* Card */}
       <div style={{
-        width: 460,
+        width: 430,
         background: T.panel,
         border: `1px solid ${drag ? T.blue : error ? `${T.red}50` : T.border}`,
-        borderRadius: 8,
-        overflow: "hidden",
+        borderRadius: 8, overflow: "hidden",
         transition: "border-color .15s",
-        boxShadow: drag ? `0 0 0 3px ${T.blue}14` : "none",
+        boxShadow: drag
+          ? `0 0 0 3px ${T.blue}16, 0 24px 64px rgba(0,8,30,0.7)`
+          : `0 24px 64px rgba(0,8,30,0.5)`,
       }}>
 
-        {/* Drop target area */}
+        {/* Drop target */}
         <div
           onDragOver={e  => { e.preventDefault(); setDrag(true) }}
           onDragLeave={() => setDrag(false)}
           onDrop={e  => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]) }}
           onClick={() => !loading && ref.current.click()}
           style={{
-            padding: "28px 36px 24px",
+            padding: "26px 36px 20px",
             display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
             cursor: loading ? "wait" : "pointer",
             borderBottom: `1px solid ${T.border}`,
-            background: drag ? `${T.blue}07` : "transparent",
+            background: drag ? `${T.blue}08` : "transparent",
             transition: "background .15s",
           }}
         >
-          {/* Icon */}
           <div style={{
             width: 36, height: 36, borderRadius: 8,
-            background: loading || drag ? `${T.blue}14` : T.card,
-            border: `1px solid ${loading || drag ? T.blue : T.border2}`,
+            background: loading || drag ? `${T.blue}18` : T.card,
+            border: `1px solid ${loading || drag ? `${T.blue}55` : T.border2}`,
             display: "flex", alignItems: "center", justifyContent: "center",
             transition: "all .15s",
           }}>
             {loading
-              ? <Loader size={16} color={T.blue} strokeWidth={1.5} style={{ animation: "spin 1s linear infinite" }} />
-              : <Upload size={16} color={drag ? T.blue : T.t2} strokeWidth={1.5} />
+              ? <Loader size={15} color={T.blue} strokeWidth={1.5} style={{ animation: "spin 1s linear infinite" }} />
+              : <Upload size={15} color={drag ? T.blue : T.t1} strokeWidth={1.5} />
             }
           </div>
 
-          {/* Copy */}
           <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, marginBottom: 4 }}>
-              {loading ? "Parsing file…" : drag ? "Release to load" : "Drop History file"}
+            <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, marginBottom: 5 }}>
+              {loading ? "Parsing…" : drag ? "Release to load" : "Drop History file"}
             </div>
             {!loading && (
               <>
-                <div style={{ fontSize: 10, fontFamily: MONO, color: T.t2, lineHeight: 1.8 }}>
-                  Chromium SQLite{" "}
-                  <code style={{ color: T.blue, background: `${T.blue}12`, padding: "1px 5px", borderRadius: 3 }}>History</code>
-                  {" · or "}
-                  <span style={{ color: T.blue, borderBottom: `1px dotted ${T.blue}` }}>click to browse</span>
+                <div style={{ fontSize: 10, fontFamily: MONO, color: T.t2, lineHeight: 1.9 }}>
+                  Raw Chromium{" "}
+                  <code style={{ color: T.blue, background: `${T.blue}14`, padding: "1px 5px", borderRadius: 3 }}>History</code>
+                  {" SQLite — or "}
+                  <span style={{ color: T.blue }}>click to browse</span>
                 </div>
-                <div style={{ fontSize: 9, fontFamily: MONO, color: T.t3, marginTop: 3 }}>
-                  %LOCALAPPDATA%\...\User Data\Default\History
+                <div style={{ fontSize: 9, fontFamily: MONO, color: T.t3, marginTop: 2 }}>
+                  %LOCALAPPDATA%\…\User Data\Default\History
                 </div>
               </>
             )}
@@ -1125,22 +941,18 @@ function DropZone({ onLoad }) {
 
         {/* Time range section */}
         {!loading && (
-          <div
-            style={{ padding: "14px 20px 18px" }}
-            onClick={e => e.stopPropagation()}
-          >
+          <div style={{ padding: "13px 20px 16px" }} onClick={e => e.stopPropagation()}>
             <div style={{
-              fontSize: 9, fontFamily: MONO, color: T.t3,
-              textTransform: "uppercase", letterSpacing: 1.3, marginBottom: 10,
-              display: "flex", alignItems: "center", gap: 6,
+              fontSize: 9, fontFamily: MONO, color: T.t2,
+              textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 10,
+              display: "flex", alignItems: "center", gap: 5,
             }}>
-              <Clock size={9} color={T.t3} />
-              Time Range
+              <Clock size={9} color={T.t2} /> Time Range
             </div>
             <TimeFilterPicker
-              days={days}             setDays={setDays}
+              days={days} setDays={setDays}
               hoursExtra={hoursExtra} setHoursExtra={setHoursExtra}
-              allTime={allTime}       setAllTime={setAllTime}
+              allTime={allTime} setAllTime={setAllTime}
             />
           </div>
         )}
@@ -1149,31 +961,24 @@ function DropZone({ onLoad }) {
       {/* Error */}
       {error && (
         <div style={{
-          marginTop: 10, width: 460,
-          padding: "9px 13px",
-          background: `${T.red}0a`, border: `1px solid ${T.red}28`,
+          marginTop: 10, width: 430, padding: "9px 13px",
+          background: `${T.red}0d`, border: `1px solid ${T.red}2a`,
           borderRadius: 6, display: "flex", alignItems: "flex-start", gap: 8,
         }}>
-          <AlertTriangle size={11} color={T.red} style={{ flexShrink: 0, marginTop: 1 }} />
-          <span style={{ flex: 1, fontSize: 10, fontFamily: MONO, color: `${T.red}cc`, lineHeight: 1.5 }}>
-            {error}
-          </span>
-          <button
-            onClick={() => setError(null)}
-            style={{ background: "none", border: "none", cursor: "pointer", color: T.t2, padding: 0, display: "flex", flexShrink: 0 }}
-          ><X size={10} /></button>
+          <div style={{ width: 4, height: 4, borderRadius: "50%", background: T.red, marginTop: 4, flexShrink: 0 }} />
+          <span style={{ flex: 1, fontSize: 10, fontFamily: MONO, color: `${T.red}bb`, lineHeight: 1.5 }}>{error}</span>
+          <button onClick={() => setError(null)}
+            style={{ background: "none", border: "none", cursor: "pointer", color: T.t2, padding: 0, display: "flex", flexShrink: 0 }}>
+            <X size={10} />
+          </button>
         </div>
       )}
 
-      {/* Browser list */}
-      <div style={{
-        marginTop: 14,
-        display: "flex", gap: 0, alignItems: "center",
-        fontSize: 9, fontFamily: MONO, color: T.t3,
-      }}>
+      {/* Supported browsers */}
+      <div style={{ marginTop: 18, display: "flex", alignItems: "center", fontSize: 9, fontFamily: MONO, color: T.t3 }}>
         {["Edge", "Chrome", "Brave", "Vivaldi", "Opera", "Chromium"].map((b, i) => (
           <span key={b} style={{ display: "flex", alignItems: "center" }}>
-            {i > 0 && <span style={{ margin: "0 7px", opacity: 0.4 }}>·</span>}
+            {i > 0 && <span style={{ margin: "0 7px", opacity: 0.3 }}>·</span>}
             {b}
           </span>
         ))}
@@ -1184,17 +989,13 @@ function DropZone({ onLoad }) {
         input[type=number]::-webkit-inner-spin-button { opacity: 0.3 }
         input[type=number] { -moz-appearance: textfield }
       `}</style>
-
-      <input
-        ref={ref} type="file" style={{ display: "none" }}
-        onChange={e => handleFile(e.target.files[0])}
-      />
+      <input ref={ref} type="file" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
     </div>
   )
 }
 
 /* ═══════════════════════════════════════════════════════════
-   PAGES REGISTRY
+   NAV PAGES REGISTRY
 ═══════════════════════════════════════════════════════════ */
 const PAGES = [
   { key: "tree",      icon: Network,  label: "Browse Tree" },
@@ -1209,6 +1010,7 @@ export default function App() {
   const [data,   setData]   = useState(null)
   const [page,   setPage]   = useState("tree")
   const [filter, setFilter] = useState("")
+  const [tz,     setTz]     = useState("ist")   // "ist" | "utc"
 
   const byId = useMemo(() =>
     data ? Object.fromEntries((data.visits || []).map(v => [v.visit_id, v])) : {}
@@ -1216,15 +1018,83 @@ export default function App() {
 
   const childrenMap = useMemo(() =>
     data
-      ? Object.fromEntries(
-          Object.entries(data.children_map || {}).map(([k, v]) => [Number(k), v])
-        )
+      ? Object.fromEntries(Object.entries(data.children_map || {}).map(([k, v]) => [Number(k), v]))
       : {}
   , [data])
 
   const rootIds = useMemo(() => data?.root_visit_ids || [], [data])
   const stats   = data?.stats || {}
-  const meta    = data?.extraction_meta || {}
+
+  /* ── Excel export: Visits sheet + Downloads sheet ───── */
+  const exportToExcel = () => {
+    const wb = XLSX.utils.book_new()
+
+    // ── Visits sheet ─────────────────────────────────────
+    const visitRows = (data.visits || []).map(v => {
+      const tr  = v.transition || {}
+      const ctx = v.context    || {}
+      const cnt = v.content    || {}
+      return {
+        "Visit ID":        v.visit_id,
+        "URL":             v.url             || "",
+        "Title":           v.title           || "",
+        "Time (IST)":      tIST(v.visit_time),
+        "Time (UTC)":      tUTC(v.visit_time),
+        "Transition":      tr.core_type      || "",
+        "Qualifiers":      (tr.qualifiers    || []).join(", "),
+        "Duration (us)":   v.visit_duration_us || 0,
+        "From Visit":      v.from_visit      || 0,
+        "Visit Source":    v.visit_source    || "",
+        "Synced":          v.is_known_to_sync ? "YES" : "no",
+        "HTTP Code":       ctx.http_response_code || "",
+        "Tab ID":          ctx.tab_id        ?? "",
+        "Window ID":       ctx.window_id     ?? "",
+        "Referrer":        v.external_referrer_url || "",
+        "Search Terms":    cnt.search_terms  || "",
+        "App ID":          v.app_id          || "",
+        "Orig GUID":       v.originator_cache_guid || "",
+      }
+    })
+    const wsVisits = XLSX.utils.json_to_sheet(visitRows)
+    // Auto column widths
+    wsVisits["!cols"] = [
+      {wch:8},{wch:80},{wch:40},{wch:22},{wch:22},{wch:16},{wch:20},
+      {wch:12},{wch:10},{wch:14},{wch:6},{wch:8},{wch:7},{wch:9},{wch:60},{wch:30},{wch:20},{wch:36},
+    ]
+    XLSX.utils.book_append_sheet(wb, wsVisits, "Visits")
+
+    // ── Downloads sheet ───────────────────────────────────
+    const dlRows = (data.downloads || []).map(dl => ({
+      "Download ID":   dl.download_id,
+      "Filename":      dl.target_path?.split(/[\\\/]/).pop() || "",
+      "Full Path":     dl.target_path   || "",
+      "State":         dl.state         || "",
+      "Start (IST)":   tIST(dl.start_time),
+      "Start (UTC)":   tUTC(dl.start_time),
+      "End (IST)":     tIST(dl.end_time),
+      "End (UTC)":     tUTC(dl.end_time),
+      "Total Bytes":   dl.total_bytes   || 0,
+      "Recv Bytes":    dl.received_bytes || 0,
+      "MIME":          dl.mime_type     || "",
+      "Orig MIME":     dl.original_mime_type || "",
+      "Site URL":      dl.site_url      || "",
+      "Tab URL":       dl.tab_url       || "",
+      "Referrer":      dl.referrer      || "",
+      "HTTP Method":   dl.http_method   || "",
+      "By Extension":  dl.by_extension_name || "",
+      "Hash (SHA256)": dl.file_hash_hex || "",
+      "ETag":          dl.etag          || "",
+    }))
+    const wsDl = XLSX.utils.json_to_sheet(dlRows)
+    wsDl["!cols"] = [
+      {wch:11},{wch:40},{wch:70},{wch:12},{wch:22},{wch:22},{wch:22},{wch:22},
+      {wch:12},{wch:12},{wch:30},{wch:30},{wch:60},{wch:60},{wch:60},{wch:10},{wch:24},{wch:66},{wch:20},
+    ]
+    XLSX.utils.book_append_sheet(wb, wsDl, "Downloads")
+
+    const ts = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "")
+    XLSX.writeFile(wb, `history_export_${ts}.xlsx`)
+  }
 
   /* ── Landing ─────────────────────────────────────────── */
   if (!data) return (
@@ -1240,178 +1110,150 @@ export default function App() {
       background: T.bg, fontFamily: MONO, overflow: "hidden"
     }}>
 
-      {/* Header */}
+      {/* ── TOP NAV ─────────────────────────────────────── */}
       <div style={{
         display: "flex", alignItems: "center", flexShrink: 0,
-        background: T.panel, borderBottom: `1px solid ${T.border}`, height: 48
+        background: T.panel, borderBottom: `1px solid ${T.border}`,
+        height: 44,
       }}>
 
-        {/* Logo */}
+        {/* Logo + title */}
         <div style={{
-          padding: "0 20px", display: "flex", alignItems: "center",
-          gap: 8, borderRight: `1px solid ${T.border}`, height: "100%"
-        }}>
-          <Shield size={15} color={T.blue} strokeWidth={1.5} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: T.t0 }}>SecOps</span>
-          <span style={{ fontSize: 9, color: T.blue }}>SOC</span>
-        </div>
-
-        {/* New File */}
-        <button
-          onClick={() => { setData(null); setFilter(""); setPage("tree") }}
-          style={{
-            margin: "0 8px 0 12px", padding: "4px 10px",
-            background: T.card, border: `1px solid ${T.border2}`,
-            color: T.t1, fontSize: 10, fontFamily: MONO,
-            borderRadius: 4, cursor: "pointer",
-            display: "flex", alignItems: "center", gap: 5
-          }}
-        >
-          <RefreshCw size={10} /> New File
-        </button>
-
-        <div style={{ width: 1, height: 24, background: T.border }} />
-
-        {/* Filter */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 12px", flex: 1 }}>
-          <Search size={12} color={T.t2} />
-          <input
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-            placeholder="Filter by URL or title…"
-            style={{
-              background: "transparent", border: "none", outline: "none",
-              color: T.t0, fontSize: 11, fontFamily: MONO,
-              width: 320, caretColor: T.blue
-            }}
-          />
-          {filter && (
-            <button
-              onClick={() => setFilter("")}
-              style={{ background: "none", border: "none", cursor: "pointer", color: T.t2, padding: 0, display: "flex" }}
-            >
-              <X size={12} />
-            </button>
-          )}
-        </div>
-
-        {/* Live stats */}
-        <div style={{
-          padding: "0 16px", borderLeft: `1px solid ${T.border}`,
-          fontSize: 10, color: T.t2, height: "100%",
-          display: "flex", alignItems: "center", gap: 8, flexShrink: 0
-        }}>
-          <span style={{ color: T.green }}>{(stats.total_visits || 0).toLocaleString()}</span>
-          <span style={{ color: T.t3 }}>visits</span>
-          <span style={{ color: T.t3 }}>·</span>
-          <span style={{ color: T.cyan }}>{(stats.total_url_records || 0).toLocaleString()}</span>
-          <span style={{ color: T.t3 }}>urls</span>
-          <span style={{ color: T.t3 }}>·</span>
-          <span style={{ color: T.amber }}>{stats.total_downloads || 0}</span>
-          <span style={{ color: T.t3 }}>dl</span>
-          {stats.hours_filter && (
-            <>
-              <span style={{ color: T.t3 }}>·</span>
-              <span style={{ color: T.teal }}>last {stats.hours_filter}h</span>
-            </>
-          )}
-          {stats.dangerous_downloads > 0 && (
-            <>
-              <span style={{ color: T.t3 }}>·</span>
-              <span style={{ color: T.red, display: "flex", alignItems: "center", gap: 3 }}>
-                <AlertTriangle size={10} />{stats.dangerous_downloads} danger
-              </span>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Body */}
-      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-
-        {/* Sidebar */}
-        <div style={{
-          width: 168, background: T.panel,
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "0 16px 0 14px",
           borderRight: `1px solid ${T.border}`,
-          flexShrink: 0, display: "flex", flexDirection: "column"
+          height: "100%", flexShrink: 0,
         }}>
-          <div style={{ height: 10 }} />
+          <div style={{
+            width: 22, height: 22, borderRadius: 5,
+            background: `${T.blue}18`, border: `1px solid ${T.blue}40`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            <Shield size={11} color={T.blue} strokeWidth={2} />
+          </div>
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.t0, letterSpacing: .3, whiteSpace: "nowrap" }}>
+            SecOps Browser History Analyzer
+          </span>
+        </div>
 
+        {/* Nav tabs */}
+        <div style={{ display: "flex", alignItems: "center", height: "100%" }}>
           {PAGES.map(({ key, icon: Icon, label }) => {
             const active = page === key
             return (
-              <button
-                key={key}
-                onClick={() => setPage(key)}
-                style={{
-                  display: "flex", alignItems: "center", gap: 10,
-                  padding: "9px 14px", background: "transparent", border: "none",
-                  borderLeft: `2px solid ${active ? T.blue : "transparent"}`,
-                  color: active ? T.t0 : T.t2, cursor: "pointer",
-                  fontSize: 11, fontFamily: MONO, textAlign: "left",
-                  transition: "all .1s",
-                  backgroundColor: active ? T.hover : "transparent"
-                }}
-                onMouseEnter={e => { if (!active) e.currentTarget.style.backgroundColor = T.card }}
-                onMouseLeave={e => { if (!active) e.currentTarget.style.backgroundColor = "transparent" }}
+              <button key={key} onClick={() => setPage(key)} style={{
+                display: "flex", alignItems: "center", gap: 6,
+                padding: "0 14px", height: "100%",
+                background: "transparent", border: "none",
+                borderBottom: `2px solid ${active ? T.blue : "transparent"}`,
+                borderTop: "2px solid transparent",
+                color: active ? T.t0 : T.t2,
+                fontSize: 11, fontFamily: MONO,
+                cursor: "pointer", transition: "color .12s, border-color .12s",
+              }}
+                onMouseEnter={e => { if (!active) e.currentTarget.style.color = T.t1 }}
+                onMouseLeave={e => { if (!active) e.currentTarget.style.color = T.t2 }}
               >
-                <Icon size={13} strokeWidth={active ? 2 : 1.5} color={active ? T.blue : T.t2} />
+                <Icon size={11} strokeWidth={active ? 2.2 : 1.5} color={active ? T.blue : "currentColor"} />
                 {label}
               </button>
             )
           })}
-
-          {/* Sidebar meta stats */}
-          <div style={{ marginTop: "auto", padding: "12px 14px", borderTop: `1px solid ${T.border}` }}>
-            {[
-              ["Browser",  meta.browser  || "—"],
-              ["Profile",  meta.profile  || "—"],
-              ["Filter",   stats.hours_filter ? `last ${stats.hours_filter}h` : "all time"],
-              ["Visits",   (stats.total_visits || 0).toLocaleString()],
-              ["URLs",     (stats.total_url_records || 0).toLocaleString()],
-              ["DLs",      stats.total_downloads || 0],
-              ["Synced",   stats.synced_visits || 0],
-              ["Sessions", stats.total_root_sessions || 0],
-            ].map(([k, v]) => (
-              <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                <span style={{ fontSize: 9, color: T.t3, fontFamily: MONO }}>{k}</span>
-                <span style={{
-                  fontSize: 9, color: T.t1, fontFamily: MONO,
-                  maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"
-                }}>{v}</span>
-              </div>
-            ))}
-          </div>
         </div>
 
-        {/* Page content */}
-        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-          {page === "tree"      && <PageTree     byId={byId} childrenMap={childrenMap} rootIds={rootIds} filter={filter} />}
-          {page === "timeline"  && <PageTimeline data={data} byId={byId} filter={filter} />}
-          {page === "downloads" && <PageDownloads data={data} filter={filter} />}
+        {/* Right controls */}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, paddingRight: 12 }}>
+
+          {/* Search */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6,
+            background: T.card, border: `1px solid ${T.border}`,
+            borderRadius: 4, padding: "0 8px", height: 26,
+          }}>
+            <Search size={11} color={T.t2} />
+            <input
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+              placeholder="Filter URL / title…"
+              style={{
+                background: "transparent", border: "none", outline: "none",
+                color: T.t0, fontSize: 10, fontFamily: MONO,
+                width: 190, caretColor: T.blue,
+              }}
+            />
+            {filter && (
+              <button onClick={() => setFilter("")}
+                style={{ background: "none", border: "none", cursor: "pointer", color: T.t2, padding: 0, display: "flex" }}>
+                <X size={10} />
+              </button>
+            )}
+          </div>
+
+          {/* IST / UTC toggle */}
+          <TzToggle tz={tz} setTz={setTz} />
+
+          <div style={{ width: 1, height: 18, background: T.border }} />
+
+          {/* Compact stats — visits · urls · dl only */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: MONO }}>
+            <span style={{ color: T.green }}>{(stats.total_visits || 0).toLocaleString()}</span>
+            <span style={{ color: T.t3 }}>visits</span>
+            <span style={{ color: T.t3 }}>·</span>
+            <span style={{ color: T.blue }}>{(stats.total_url_records || 0).toLocaleString()}</span>
+            <span style={{ color: T.t3 }}>urls</span>
+            <span style={{ color: T.t3 }}>·</span>
+            <span style={{ color: T.amber }}>{stats.total_downloads || 0}</span>
+            <span style={{ color: T.t3 }}>dl</span>
+            {stats.hours_filter && (
+              <>
+                <span style={{ color: T.t3 }}>·</span>
+                <span style={{ color: T.teal }}>last {stats.hours_filter}h</span>
+              </>
+            )}
+          </div>
+
+          <div style={{ width: 1, height: 18, background: T.border }} />
+
+          {/* Export Excel */}
+          <button
+            onClick={exportToExcel}
+            style={{
+              padding: "3px 10px", height: 26,
+              background: `${T.green}14`, border: `1px solid ${T.green}40`,
+              color: T.green, fontSize: 10, fontFamily: MONO,
+              borderRadius: 4, cursor: "pointer",
+              display: "flex", alignItems: "center", gap: 5,
+              transition: "background .12s, border-color .12s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = `${T.green}28`; e.currentTarget.style.borderColor = `${T.green}80` }}
+            onMouseLeave={e => { e.currentTarget.style.background = `${T.green}14`; e.currentTarget.style.borderColor = `${T.green}40` }}
+          >
+            <FileDown size={11} /> Export .xlsx
+          </button>
+
+          {/* New File */}
+          <button
+            onClick={() => { setData(null); setFilter(""); setPage("tree"); setTz("ist") }}
+            style={{
+              padding: "3px 10px", height: 26,
+              background: T.card, border: `1px solid ${T.border2}`,
+              color: T.t1, fontSize: 10, fontFamily: MONO,
+              borderRadius: 4, cursor: "pointer",
+              display: "flex", alignItems: "center", gap: 5,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = T.blue; e.currentTarget.style.color = T.t0 }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = T.border2; e.currentTarget.style.color = T.t1 }}
+          >
+            <RefreshCw size={10} /> New File
+          </button>
         </div>
       </div>
 
-      {/* Status bar */}
-      <div style={{
-        height: 22, background: T.panel, borderTop: `1px solid ${T.border}`,
-        display: "flex", alignItems: "center", padding: "0 14px",
-        flexShrink: 0, gap: 16
-      }}>
-        <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>
-          Parsed: {(meta.extracted_at_ist || "").slice(0, 19)}
-        </span>
-        <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>·</span>
-        <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>
-          SHA256: {(meta.source_sha256 || "").slice(0, 24)}{meta.source_sha256 ? "…" : ""}
-        </span>
-        <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>·</span>
-        <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>
-          DB v{meta.db_meta?.version || "?"}
-        </span>
-        <span style={{ marginLeft: "auto", fontSize: 9, fontFamily: MONO, color: T.t3 }}>
-          SecOps SOC · v2.2
-        </span>
+      {/* ── PAGE CONTENT ────────────────────────────────── */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+        {page === "tree"      && <PageTree      byId={byId} childrenMap={childrenMap} rootIds={rootIds} filter={filter} tz={tz} />}
+        {page === "timeline"  && <PageTimeline  data={data} byId={byId} filter={filter} tz={tz} />}
+        {page === "downloads" && <PageDownloads data={data} filter={filter} tz={tz} />}
       </div>
     </div>
   )
