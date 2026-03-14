@@ -433,6 +433,7 @@ function fetchMeta(db) {
   return meta
 }
 
+
 // mirrors: ChromiumHistoryExtractor.build_visit_tree()
 // Priority: from_visit first, opener_visit as fallback (handles Ctrl+click new tabs)
 function buildVisitTree(visits, urls, visitSources, ctxMap, cntMap) {
@@ -472,7 +473,10 @@ function buildVisitTree(visits, urls, visitSources, ctxMap, cntMap) {
       roots.push(vid)
     }
   }
-
+    const byTime = (a, b) =>
+    (enriched[b]?.visit_time?.unix_ms || 0) - (enriched[a]?.visit_time?.unix_ms || 0)
+  roots.sort(byTime)
+  for (const kids of Object.values(childrenMap)) kids.sort(byTime)
   // BFS depth assignment — avoids call stack overflow on deep histories
   const queue = roots.map(r => [r, 0])
   let qi = 0

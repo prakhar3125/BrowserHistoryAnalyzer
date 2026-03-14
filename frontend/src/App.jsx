@@ -596,7 +596,8 @@ function PageTimeline({ data, byId, filter, tz }) {
       .sort((a, b) => (b.visit_time?.unix_ms || 0) - (a.visit_time?.unix_ms || 0))
   }, [data.visits, filter])
 
-  const { sorted, col, asc, toggle } = useSort(visits, null)
+  const { sorted, col, asc, toggle } = useSort(visits, "visit_time")
+
 
   // Reset page on filter/sort change to avoid empty slice
   useEffect(() => { setPage(0) }, [filter, col, asc])
