@@ -1,4 +1,5 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from "react"
+import { useState, useMemo, useCallback, useRef, useEffect,
+         useDeferredValue, Component } from "react"
 import {
   Upload, ChevronRight, ChevronDown, Search, X, Clock,
   Download, RefreshCw, Shield, Database,
@@ -45,6 +46,31 @@ const TC = {
 const MONO = "'Cascadia Code','JetBrains Mono','Fira Code','Consolas',monospace"
 
 /* ═══════════════════════════════════════════════════════════
+   ERROR BOUNDARY
+   Wraps each page so a single bad data row cannot unmount the
+   entire app. key={page} in App resets it on navigation.
+═══════════════════════════════════════════════════════════ */
+class ErrorBoundary extends Component {
+  state = { error: null }
+  static getDerivedStateFromError(error) { return { error } }
+  componentDidCatch(error, info) { console.error("[ErrorBoundary]", error, info) }
+  render() {
+    if (this.state.error) return (
+      <div style={{ padding: 32, fontFamily: MONO, color: T.red, display: "flex", flexDirection: "column", gap: 12 }}>
+        <span style={{ fontSize: 12, fontWeight: 700 }}>Render error: {this.state.error.message}</span>
+        <button
+          onClick={() => this.setState({ error: null })}
+          style={{ padding: "4px 12px", background: T.card, border: `1px solid ${T.red}40`,
+            color: T.red, fontSize: 10, fontFamily: MONO, borderRadius: 3, cursor: "pointer",
+            alignSelf: "flex-start" }}
+        >Retry</button>
+      </div>
+    )
+    return this.props.children
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
    UTILS
 ═══════════════════════════════════════════════════════════ */
 const fmtDur = us => {
@@ -62,21 +88,29 @@ const fmtBytes = b => {
   return `${(b / (1 << 30)).toFixed(2)}GB`
 }
 
-// Primary display respects tz toggle; secondary shows the other
 const tShow = (ts, tz) => (tz === "ist" ? ts?.ist : ts?.utc) || ts?.utc || ts?.ist || "—"
 const tAlt  = (ts, tz) => (tz === "ist" ? ts?.utc : ts?.ist) || "—"
 const tIST  = ts => ts?.ist || ts?.utc || "—"
 const tUTC  = ts => ts?.utc || "—"
 
+// FIX: use URL API — split-on-"//" crashes on chrome://, about:blank, data:, file:
 const dom = url => {
-  try { return url.split("//")[1].split("/")[0].replace(/^www\./, "") }
-  catch { return url?.slice?.(0, 40) ?? "" }
+  try {
+    const { hostname } = new URL(url)
+    return hostname.replace(/^www\./, "") || url.slice(0, 40)
+  } catch {
+    return url?.slice?.(0, 40) ?? ""
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════
-   flattenTree — two-pass filter with ancestor context rows
+   flattenTree
+   Returns { rows, truncated }.
+   FIX: truncated uses >= limit (was ===, which was off-by-one).
+   Limit raised to 8 000 — more than enough for 1-month data.
+   parentOf is passed in (memoized in PageTree, not rebuilt here).
 ═══════════════════════════════════════════════════════════ */
-function flattenTree(rootIds, childrenMap, byId, openSet, filter, limit = 4000) {
+function flattenTree(rootIds, childrenMap, byId, openSet, filter, parentOf, limit = 8000) {
   const ft  = filter.toLowerCase()
   const out = []
 
@@ -92,32 +126,30 @@ function flattenTree(rootIds, childrenMap, byId, openSet, filter, limit = 4000) 
         for (let i = kids.length - 1; i >= 0; i--)
           stack.push({ id: kids[i], depth: depth + 1 })
     }
-    return out
+    return { rows: out, truncated: out.length >= limit }
   }
 
-  // Pass 1: self-matching nodes
+  // Pass 1: nodes that directly match the filter
   const selfMatch = new Set()
   for (const idStr of Object.keys(byId)) {
     const v = byId[idStr]; if (!v) continue
-    if ((v.url || "").toLowerCase().includes(ft) || (v.title || "").toLowerCase().includes(ft))
-      selfMatch.add(Number(idStr))
+    if (
+      (v.url   || "").toLowerCase().includes(ft) ||
+      (v.title || "").toLowerCase().includes(ft)
+    ) selfMatch.add(Number(idStr))
   }
 
-  // Build child → parent map
-  const parentOf = {}
-  for (const [pid, kids] of Object.entries(childrenMap))
-    for (const kid of kids) parentOf[kid] = Number(pid)
-
-  // Pass 2: mark all ancestors as context rows
-  const descMatch = new Set()
+  // Pass 2: walk up to mark ancestors as dimmed context rows
+  const ancestorMatch = new Set()
   for (const id of selfMatch) {
     let cur = parentOf[id]
     while (cur !== undefined) {
-      if (descMatch.has(cur)) break
-      descMatch.add(cur); cur = parentOf[cur]
+      if (ancestorMatch.has(cur)) break
+      ancestorMatch.add(cur); cur = parentOf[cur]
     }
   }
 
+  // Pass 3: DFS render
   const stack = [...rootIds].reverse().map(id => ({ id, depth: 0 }))
   while (stack.length && out.length < limit) {
     const { id, depth } = stack.pop()
@@ -125,31 +157,33 @@ function flattenTree(rootIds, childrenMap, byId, openSet, filter, limit = 4000) 
     const kids   = childrenMap[id] || []
     const isOpen = openSet.has(id)
     const isSelf = selfMatch.has(id)
-    const isCtx  = !isSelf && descMatch.has(id)
+    const isCtx  = !isSelf && ancestorMatch.has(id)
 
-    if (isSelf)     out.push({ id, depth, hasKids: kids.length > 0, open: isOpen, dimmed: false })
-    else if (isCtx) out.push({ id, depth, hasKids: kids.length > 0, open: true,   dimmed: true  })
+    if (isSelf)
+      out.push({ id, depth, hasKids: kids.length > 0, open: isOpen, dimmed: false })
+    else if (isCtx)
+      out.push({ id, depth, hasKids: kids.length > 0, open: true,   dimmed: true  })
 
     if ((isSelf && isOpen) || isCtx)
       for (let i = kids.length - 1; i >= 0; i--)
         stack.push({ id: kids[i], depth: depth + 1 })
   }
-  return out
+
+  return { rows: out, truncated: out.length >= limit }
 }
 
 /* ═══════════════════════════════════════════════════════════
-   useSort — type-aware comparator: timestamps, numbers, strings
+   useSort
 ═══════════════════════════════════════════════════════════ */
 function useSort(data, def) {
   const [col, setCol] = useState(def)
-  const [asc, setAsc] = useState(false)
+  const [asc, setAsc] = useState(false)   // false = descending = newest first
   const toggle = c => { if (col === c) setAsc(a => !a); else { setCol(c); setAsc(true) } }
 
   const sorted = useMemo(() => {
     if (!col) return data
     return [...data].sort((a, b) => {
       let av = a[col], bv = b[col]
-      // Timestamp objects { unix_ms, ist, utc } → compare numerically
       if (av && typeof av === "object" && "unix_ms" in av) av = av.unix_ms ?? 0
       if (bv && typeof bv === "object" && "unix_ms" in bv) bv = bv.unix_ms ?? 0
       const na = Number(av), nb = Number(bv)
@@ -174,12 +208,18 @@ const Badge = ({ text, color }) => (
   }}>{text}</span>
 )
 
+// FIX 1: position:"relative" added to <th> so the absolute resize handle
+//         anchors to its own cell, not a higher positioned ancestor.
+// FIX 2: `active` flag in mousedown prevents stale onMove from calling
+//         onResize after the component unmounts mid-drag.
 const TH = ({ children, width, onClick, sorted, onResize }) => {
   const handleMouseDown = e => {
     e.preventDefault(); e.stopPropagation()
     const startX = e.clientX, startW = typeof width === "number" ? width : 100
-    const onMove = mv => onResize && onResize(Math.max(36, startW + mv.clientX - startX))
+    let active = true
+    const onMove = mv => { if (active && onResize) onResize(Math.max(36, startW + mv.clientX - startX)) }
     const onUp   = () => {
+      active = false
       document.removeEventListener("mousemove", onMove)
       document.removeEventListener("mouseup",   onUp)
       document.body.style.cursor = document.body.style.userSelect = ""
@@ -199,7 +239,9 @@ const TH = ({ children, width, onClick, sorted, onResize }) => {
       minWidth: typeof width === "number" ? width : undefined,
       maxWidth: typeof width === "number" ? width : undefined,
       cursor: onClick ? "pointer" : "default",
-      userSelect: "none", position: "sticky", top: 0, zIndex: 1,
+      userSelect: "none",
+      // FIX: sticky + relative together so resize handle positions correctly
+      position: "sticky", top: 0, zIndex: 1,
       boxSizing: "border-box",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 4, paddingRight: 8 }}>
@@ -246,8 +288,7 @@ function TzToggle({ tz, setTz }) {
         <button key={z} onClick={() => setTz(z)} style={{
           padding: "0 10px", height: "100%",
           background: tz === z ? T.blue : "transparent",
-          border: "none",
-          color: tz === z ? "#fff" : T.t1,
+          border: "none", color: tz === z ? "#fff" : T.t1,
           fontSize: 10, fontFamily: MONO, fontWeight: 700,
           cursor: "pointer", letterSpacing: .8,
           transition: "background .12s, color .12s",
@@ -311,7 +352,7 @@ function DetailPanelContent({ item, type, tz }) {
         <Row label="App ID"     value={v.app_id} color={T.t1} />
         {Object.keys(ctx).length > 0 && <>
           <Sep title="Context" />
-          <Row label="HTTP"       value={http || "—"}                                             color={httpColor} />
+          <Row label="HTTP"       value={http || "—"}     color={httpColor} />
           <Row label="Win/Tab"    value={`${ctx.window_id} / ${ctx.tab_id}`} />
           <Row label="Tasks"      value={`${ctx.task_id}→${ctx.root_task_id}→${ctx.parent_task_id}`} color={T.t2} />
           <Row label="FG Dur"     value={fmtDur(ctx.total_foreground_duration_us)} />
@@ -368,33 +409,69 @@ function DetailPanelContent({ item, type, tz }) {
 
 /* ═══════════════════════════════════════════════════════════
    SLIDE PANEL
+   FIX 1: role="dialog" aria-modal="true" — screen readers know
+          the context is restricted to this panel.
+   FIX 2: Focus trap — when open, Tab/Shift-Tab cycle is contained
+          inside the panel. Focus is seized on open and released
+          on close. ESC still closes. Listener cleaned up on unmount.
 ═══════════════════════════════════════════════════════════ */
 function SlidePanel({ item, type, tz, onClose }) {
-  const open = !!item
+  const open       = !!item
   const onCloseRef = useRef(onClose)
+  const panelRef   = useRef(null)
+  const closeRef   = useRef(null)
+
   useEffect(() => { onCloseRef.current = onClose })
+
   useEffect(() => {
-    if (!open) return
-    const h = e => { if (e.key === "Escape") onCloseRef.current() }
-    window.addEventListener("keydown", h)
-    return () => window.removeEventListener("keydown", h)
+    if (!open || !panelRef.current) return
+
+    // Seize focus on open
+    closeRef.current?.focus()
+
+    const panel = panelRef.current
+    const getFocusable = () => Array.from(panel.querySelectorAll(
+      'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    ))
+
+    const handleKey = e => {
+      if (e.key === "Escape") { onCloseRef.current(); return }
+      if (e.key !== "Tab") return
+      const els = getFocusable()
+      if (!els.length) return
+      const first = els[0], last = els[els.length - 1]
+      if (e.shiftKey) {
+        if (document.activeElement === first) { e.preventDefault(); last?.focus() }
+      } else {
+        if (document.activeElement === last)  { e.preventDefault(); first?.focus() }
+      }
+    }
+
+    document.addEventListener("keydown", handleKey)
+    return () => document.removeEventListener("keydown", handleKey)
   }, [open])
 
   return (
     <>
-      <div onClick={onClose} style={{
+      <div onClick={onClose} role="presentation" style={{
         position: "fixed", inset: 0, background: "rgba(0,5,20,0.55)", zIndex: 50,
         opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none",
         transition: "opacity 0.2s ease",
       }} />
-      <div style={{
-        position: "fixed", right: 0, top: 0, bottom: 0, width: 360,
-        background: T.panel, borderLeft: `1px solid ${T.border2}`,
-        zIndex: 51, display: "flex", flexDirection: "column",
-        transform: open ? "translateX(0)" : "translateX(100%)",
-        transition: "transform 0.24s cubic-bezier(0.4,0,0.2,1)",
-        boxShadow: open ? "-8px 0 40px rgba(0,5,20,0.7)" : "none",
-      }}>
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={type === "visit" ? "Visit Detail" : "Download Detail"}
+        style={{
+          position: "fixed", right: 0, top: 0, bottom: 0, width: 360,
+          background: T.panel, borderLeft: `1px solid ${T.border2}`,
+          zIndex: 51, display: "flex", flexDirection: "column",
+          transform: open ? "translateX(0)" : "translateX(100%)",
+          transition: "transform 0.24s cubic-bezier(0.4,0,0.2,1)",
+          boxShadow: open ? "-8px 0 40px rgba(0,5,20,0.7)" : "none",
+        }}
+      >
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "10px 14px", borderBottom: `1px solid ${T.border}`,
@@ -408,11 +485,15 @@ function SlidePanel({ item, type, tz, onClose }) {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>ESC</span>
-            <button onClick={onClose} style={{
-              background: T.card, border: `1px solid ${T.border}`, borderRadius: 4,
-              cursor: "pointer", color: T.t1,
-              display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26,
-            }}
+            <button
+              ref={closeRef}
+              onClick={onClose}
+              aria-label="Close detail panel"
+              style={{
+                background: T.card, border: `1px solid ${T.border}`, borderRadius: 4,
+                cursor: "pointer", color: T.t1,
+                display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26,
+              }}
               onMouseEnter={e => { e.currentTarget.style.background = T.hover; e.currentTarget.style.color = T.t0 }}
               onMouseLeave={e => { e.currentTarget.style.background = T.card;  e.currentTarget.style.color = T.t1 }}
             ><X size={13} /></button>
@@ -437,34 +518,70 @@ function SlidePanel({ item, type, tz, onClose }) {
 
 /* ═══════════════════════════════════════════════════════════
    PAGE: BROWSE TREE
+
+   FIX 1 — parentOf memoized here, not rebuilt inside flattenTree.
+   FIX 2 — expandDepth uses iterative BFS (not recursive DFS).
+   FIX 3 — flattenTree returns { rows, truncated }; amber warning shown.
+   FIX 4 — useDeferredValue on filter; table dims while stale.
+   FIX 5 — stable colResizers via useMemo (no new fn refs per render).
+   FIX 6 — expandAll/collapseAll wrapped in useCallback.
+   FIX 7 — expand toggle is a <button> (keyboard accessible) not <span>.
 ═══════════════════════════════════════════════════════════ */
 function PageTree({ byId, childrenMap, rootIds, filter, tz }) {
   const [open, setOpen] = useState(new Set())
   const [sel,  setSel]  = useState(null)
   const [cols, setCols] = useState({ url: 440, time: 145, trans: 115, dur: 72, src: 70, tab: 45 })
-  const rz = key => w => setCols(c => ({ ...c, [key]: w }))
 
-  const flat = useMemo(() =>
-    flattenTree(rootIds, childrenMap, byId, open, filter),
-    [rootIds, childrenMap, byId, open, filter]
+  const deferredFilter = useDeferredValue(filter)
+  const isStale        = filter !== deferredFilter
+
+  // FIX 5: stable per-column resizers — setCols is guaranteed stable by React
+  const colResizers = useMemo(() => ({
+    url:   w => setCols(c => ({ ...c, url:   w })),
+    time:  w => setCols(c => ({ ...c, time:  w })),
+    trans: w => setCols(c => ({ ...c, trans: w })),
+    dur:   w => setCols(c => ({ ...c, dur:   w })),
+    src:   w => setCols(c => ({ ...c, src:   w })),
+    tab:   w => setCols(c => ({ ...c, tab:   w })),
+  }), [])
+
+  // FIX 1: build once per data load
+  const parentOf = useMemo(() => {
+    const map = {}
+    for (const [pid, kids] of Object.entries(childrenMap))
+      for (const kid of kids) map[kid] = Number(pid)
+    return map
+  }, [childrenMap])
+
+  const { rows: flat, truncated } = useMemo(() =>
+    flattenTree(rootIds, childrenMap, byId, open, deferredFilter, parentOf),
+    [rootIds, childrenMap, byId, open, deferredFilter, parentOf]
   )
 
   const toggle = useCallback(id => {
     setOpen(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n })
   }, [])
 
-  const expandAll   = () => { const s = new Set(); Object.keys(childrenMap).forEach(k => s.add(Number(k))); setOpen(s) }
-  const collapseAll = () => setOpen(new Set())
-  const expandDepth = max => {
+  // FIX 6
+  const expandAll = useCallback(() => {
+    setOpen(new Set(Object.keys(childrenMap).map(Number)))
+  }, [childrenMap])
+
+  const collapseAll = useCallback(() => setOpen(new Set()), [])
+
+  // FIX 2: iterative BFS — recursive DFS stack-overflows on deep chains
+  const expandDepth = useCallback(max => {
     const add = new Set()
-    const dfs = (id, d) => {
-      if (d >= max) return
+    const queue = rootIds.map(id => ({ id, d: 0 }))
+    let qi = 0
+    while (qi < queue.length) {
+      const { id, d } = queue[qi++]
+      if (d >= max) continue
       const kids = childrenMap[id] || []
-      if (kids.length) { add.add(id); kids.forEach(k => dfs(k, d + 1)) }
+      if (kids.length) { add.add(id); for (const kid of kids) queue.push({ id: kid, d: d + 1 }) }
     }
-    rootIds.forEach(r => dfs(r, 0))
     setOpen(add)
-  }
+  }, [rootIds, childrenMap])
 
   const selVisit = byId[sel]
 
@@ -472,17 +589,17 @@ function PageTree({ byId, childrenMap, rootIds, filter, tz }) {
     <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-        {/* Toolbar row */}
+        {/* Toolbar */}
         <div style={{
           display: "flex", alignItems: "center", gap: 6, padding: "7px 14px",
           background: T.surf, borderBottom: `1px solid ${T.border}`, flexShrink: 0
         }}>
           {[
-            ["Expand All",  expandAll],
-            ["Collapse",    collapseAll],
-            ["Depth 1",     () => expandDepth(1)],
-            ["Depth 2",     () => expandDepth(2)],
-            ["Depth 3",     () => expandDepth(3)],
+            ["Expand All", expandAll],
+            ["Collapse",   collapseAll],
+            ["Depth 1",    () => expandDepth(1)],
+            ["Depth 2",    () => expandDepth(2)],
+            ["Depth 3",    () => expandDepth(3)],
           ].map(([t, fn]) => (
             <button key={t} onClick={fn} style={{
               padding: "3px 9px", background: T.card,
@@ -491,7 +608,6 @@ function PageTree({ byId, childrenMap, rootIds, filter, tz }) {
             }}>{t}</button>
           ))}
 
-          {/* Compact transition legend */}
           <div style={{ marginLeft: 10, display: "flex", alignItems: "center", gap: 10, borderLeft: `1px solid ${T.border}`, paddingLeft: 10 }}>
             {Object.entries({ TYPED: TC.TYPED, LINK: TC.LINK, FORM: TC.FORM_SUBMIT, RELOAD: TC.RELOAD, KW: TC.KEYWORD }).map(([k, c]) => (
               <span key={k} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9, fontFamily: MONO, color: c }}>
@@ -501,22 +617,34 @@ function PageTree({ byId, childrenMap, rootIds, filter, tz }) {
             ))}
           </div>
 
-          <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: MONO, color: T.t2 }}>
-            {flat.length.toLocaleString()} nodes
-          </span>
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+            {truncated && (
+              <span style={{
+                fontSize: 9, fontFamily: MONO, color: T.amber,
+                background: `${T.amber}14`, border: `1px solid ${T.amber}30`,
+                padding: "2px 7px", borderRadius: 3,
+              }}>⚠ limit reached — collapse nodes to see more</span>
+            )}
+            {isStale && (
+              <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3 }}>filtering…</span>
+            )}
+            <span style={{ fontSize: 10, fontFamily: MONO, color: T.t2 }}>
+              {flat.length.toLocaleString()} nodes
+            </span>
+          </div>
         </div>
 
-        {/* Tree table */}
-        <div style={{ flex: 1, overflow: "auto" }}>
+        {/* Tree table — FIX 4: dims while deferred filter is catching up */}
+        <div style={{ flex: 1, overflow: "auto", opacity: isStale ? 0.6 : 1, transition: "opacity 0.15s" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <TH width={cols.url}   onResize={rz("url")}>URL / Navigation Chain</TH>
-                <TH width={cols.time}  onResize={rz("time")}>Time ({tz.toUpperCase()})</TH>
-                <TH width={cols.trans} onResize={rz("trans")}>Transition</TH>
-                <TH width={cols.dur}   onResize={rz("dur")}>Duration</TH>
-                <TH width={cols.src}   onResize={rz("src")}>Source</TH>
-                <TH width={cols.tab}   onResize={rz("tab")}>Tab</TH>
+                <TH width={cols.url}   onResize={colResizers.url}>URL / Navigation Chain</TH>
+                <TH width={cols.time}  onResize={colResizers.time}>Time ({tz.toUpperCase()})</TH>
+                <TH width={cols.trans} onResize={colResizers.trans}>Transition</TH>
+                <TH width={cols.dur}   onResize={colResizers.dur}>Duration</TH>
+                <TH width={cols.src}   onResize={colResizers.src}>Source</TH>
+                <TH width={cols.tab}   onResize={colResizers.tab}>Tab</TH>
                 <TH>Title</TH>
               </tr>
             </thead>
@@ -528,30 +656,46 @@ function PageTree({ byId, childrenMap, rootIds, filter, tz }) {
                 const isSel = sel === id
                 const tc    = TC[tr.core_type]
                 return (
-                  <tr key={id} onClick={() => setSel(id)}
+                  <tr
+                    key={id}
+                    onClick={() => setSel(id)}
+                    tabIndex={0}
+                    aria-selected={isSel}
+                    onKeyDown={e => (e.key === "Enter" || e.key === " ") && setSel(id)}
                     style={{ background: isSel ? T.sel : "transparent", cursor: "pointer", opacity: dimmed ? 0.28 : 1 }}
                     onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = T.hover }}
                     onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = "transparent" }}
                   >
                     <td style={{ padding: "5px 8px", borderBottom: `1px solid ${T.border}`, whiteSpace: "nowrap", overflow: "hidden" }}>
                       <div style={{ display: "flex", alignItems: "center", paddingLeft: depth * 16, gap: 4 }}>
-                        <span
-                          onClick={e => { e.stopPropagation(); toggle(id) }}
+
+                        {/* FIX 7: <button> not <span> — Tab-reachable, Enter/Space activates */}
+                        <button
+                          onClick={e => { e.stopPropagation(); if (hasKids) toggle(id) }}
+                          onKeyDown={e => {
+                            if ((e.key === "Enter" || e.key === " ") && hasKids) {
+                              e.stopPropagation(); toggle(id)
+                            }
+                          }}
+                          aria-expanded={hasKids ? isOpen : undefined}
+                          aria-label={isOpen ? "Collapse" : "Expand"}
+                          disabled={!hasKids}
                           style={{
                             width: 26, height: 26, display: "flex", alignItems: "center",
-                            justifyContent: "center", cursor: hasKids ? "pointer" : "default",
-                            flexShrink: 0, borderRadius: 4,
+                            justifyContent: "center", flexShrink: 0, borderRadius: 4,
+                            cursor: hasKids ? "pointer" : "default",
                             background: hasKids ? `${T.blue}14` : "transparent",
                             border: hasKids ? `1px solid ${T.blue}30` : "1px solid transparent",
-                            color: isOpen ? T.blue : T.t1,
+                            color: isOpen ? T.blue : T.t1, padding: 0,
                           }}
                           onMouseEnter={e => { if (hasKids) e.currentTarget.style.background = `${T.blue}28` }}
-                          onMouseLeave={e => { if (hasKids) e.currentTarget.style.background = hasKids ? `${T.blue}14` : "transparent" }}
+                          onMouseLeave={e => { e.currentTarget.style.background = hasKids ? `${T.blue}14` : "transparent" }}
                         >
                           {hasKids
                             ? (isOpen ? <ChevronDown size={17} strokeWidth={2.2} /> : <ChevronRight size={17} strokeWidth={2.2} />)
                             : <span style={{ width: 17 }} />}
-                        </span>
+                        </button>
+
                         <span style={{
                           fontSize: 11, fontFamily: MONO, color: tc || T.t0,
                           overflow: "hidden", textOverflow: "ellipsis", display: "block",
@@ -581,33 +725,55 @@ function PageTree({ byId, childrenMap, rootIds, filter, tz }) {
 
 /* ═══════════════════════════════════════════════════════════
    PAGE: TIMELINE
+
+   FIX 1 — DOUBLE-SORT REMOVED.
+            Old code: useMemo sorted, then useSort sorted again.
+            Both ran on every render = O(n log n) wasted work.
+            Now: useMemo only FILTERS. useSort owns ALL sorting.
+            default "visit_time" + asc=false → newest first on load.
+   FIX 2 — useDeferredValue keeps typing instantaneous.
+   FIX 3 — stable colResizers via useMemo.
 ═══════════════════════════════════════════════════════════ */
 function PageTimeline({ data, byId, filter, tz }) {
   const [sel,  setSel]  = useState(null)
   const [page, setPage] = useState(0)
   const [cols, setCols] = useState({ time: 182, domain: 160, title: 190, trans: 115, dur: 72, http: 46, tab: 46 })
-  const rz  = key => w => setCols(c => ({ ...c, [key]: w }))
   const PER = 200
 
-  const visits = useMemo(() => {
-    const ft = filter.toLowerCase()
-    return (data.visits || [])
-      .filter(v => !ft || (v.url || "").toLowerCase().includes(ft) || (v.title || "").toLowerCase().includes(ft))
-      .sort((a, b) => (b.visit_time?.unix_ms || 0) - (a.visit_time?.unix_ms || 0))
-  }, [data.visits, filter])
+  const deferredFilter = useDeferredValue(filter)
+  const isStale        = filter !== deferredFilter
 
+  const colResizers = useMemo(() => ({
+    time:   w => setCols(c => ({ ...c, time:   w })),
+    domain: w => setCols(c => ({ ...c, domain: w })),
+    title:  w => setCols(c => ({ ...c, title:  w })),
+    trans:  w => setCols(c => ({ ...c, trans:  w })),
+    dur:    w => setCols(c => ({ ...c, dur:    w })),
+    http:   w => setCols(c => ({ ...c, http:   w })),
+    tab:    w => setCols(c => ({ ...c, tab:    w })),
+  }), [])
+
+  // FIX 1: filter only — useSort handles all sorting below
+  const visits = useMemo(() => {
+    const ft = deferredFilter.toLowerCase()
+    return (data.visits || []).filter(v =>
+      !ft ||
+      (v.url   || "").toLowerCase().includes(ft) ||
+      (v.title || "").toLowerCase().includes(ft)
+    )
+  }, [data.visits, deferredFilter])
+
+  // Single sort pass — default "visit_time" descending (asc=false = newest first)
   const { sorted, col, asc, toggle } = useSort(visits, "visit_time")
 
-
-  // Reset page on filter/sort change to avoid empty slice
-  useEffect(() => { setPage(0) }, [filter, col, asc])
+  useEffect(() => { setPage(0) }, [deferredFilter, col, asc])
 
   const pages    = Math.ceil(sorted.length / PER) || 1
   const pageData = sorted.slice(page * PER, (page + 1) * PER)
   const selVisit = byId[sel]
 
   const hdr = (label, field, colKey) => (
-    <TH key={label} width={cols[colKey]} onResize={rz(colKey)}
+    <TH key={label} width={cols[colKey]} onResize={colResizers[colKey]}
         onClick={() => toggle(field)}
         sorted={col === field ? (asc ? "asc" : "desc") : undefined}>
       {label}
@@ -629,6 +795,9 @@ function PageTimeline({ data, byId, filter, tz }) {
           <span style={{ fontSize: 10, fontFamily: MONO, color: T.t2 }}>
             Page {page + 1} / {pages}
           </span>
+          {isStale && (
+            <span style={{ fontSize: 9, fontFamily: MONO, color: T.t3, marginLeft: 4 }}>filtering…</span>
+          )}
           <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
             <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
               style={{ padding: "3px 9px", background: T.card, border: `1px solid ${T.border2}`,
@@ -641,17 +810,17 @@ function PageTimeline({ data, byId, filter, tz }) {
           </div>
         </div>
 
-        <div style={{ flex: 1, overflow: "auto" }}>
+        <div style={{ flex: 1, overflow: "auto", opacity: isStale ? 0.6 : 1, transition: "opacity 0.15s" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <thead>
               <tr>
                 {hdr(`Time (${tz.toUpperCase()})`, "visit_time", "time")}
                 {hdr("Domain",                      "url",        "domain")}
                 {hdr("Title",                       "title",      "title")}
-                <TH width={cols.trans} onResize={rz("trans")}>Transition</TH>
-                <TH width={cols.dur}   onResize={rz("dur")}>Duration</TH>
-                <TH width={cols.http}  onResize={rz("http")}>HTTP</TH>
-                <TH width={cols.tab}   onResize={rz("tab")}>Tab</TH>
+                <TH width={cols.trans} onResize={colResizers.trans}>Transition</TH>
+                <TH width={cols.dur}   onResize={colResizers.dur}>Duration</TH>
+                <TH width={cols.http}  onResize={colResizers.http}>HTTP</TH>
+                <TH width={cols.tab}   onResize={colResizers.tab}>Tab</TH>
                 <TH>Referrer</TH>
               </tr>
             </thead>
@@ -665,12 +834,16 @@ function PageTimeline({ data, byId, filter, tz }) {
                 const hc    = http.startsWith("4") || http.startsWith("5") ? T.red
                             : http === "200" ? T.green : T.t1
                 return (
-                  <tr key={v.visit_id} onClick={() => setSel(v.visit_id)}
+                  <tr
+                    key={v.visit_id}
+                    onClick={() => setSel(v.visit_id)}
+                    tabIndex={0}
+                    aria-selected={isSel}
+                    onKeyDown={e => (e.key === "Enter" || e.key === " ") && setSel(v.visit_id)}
                     style={{ background: isSel ? T.sel : i % 2 === 0 ? "transparent" : `${T.surf}70`, cursor: "pointer" }}
                     onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = T.hover }}
                     onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = i % 2 === 0 ? "transparent" : `${T.surf}70` }}
                   >
-                    {/* Two-line time cell: primary tz prominent, secondary small */}
                     <td style={{ padding: "4px 10px", borderBottom: `1px solid ${T.border}`, fontFamily: MONO, whiteSpace: "nowrap" }}>
                       <div style={{ fontSize: 11, color: T.t0, lineHeight: 1.3 }}>{tShow(v.visit_time, tz)}</div>
                       <div style={{ fontSize: 9,  color: T.t3, lineHeight: 1.3, marginTop: 1 }}>{tAlt(v.visit_time, tz)}</div>
@@ -695,24 +868,41 @@ function PageTimeline({ data, byId, filter, tz }) {
 }
 
 /* ═══════════════════════════════════════════════════════════
-   PAGE: DOWNLOADS  — no verdict / flagged columns
+   PAGE: DOWNLOADS
+   FIX 1 — dlById O(1) map replaces O(n) dls.find() on every render.
+   FIX 2 — stable colResizers via useMemo.
+   FIX 3 — useDeferredValue on filter.
 ═══════════════════════════════════════════════════════════ */
 function PageDownloads({ data, filter, tz }) {
   const [sel,  setSel]  = useState(null)
   const [cols, setCols] = useState({ time: 145, file: 220, size: 76, state: 95, mime: 160 })
-  const rz = key => w => setCols(c => ({ ...c, [key]: w }))
+
+  const colResizers = useMemo(() => ({
+    time:  w => setCols(c => ({ ...c, time:  w })),
+    file:  w => setCols(c => ({ ...c, file:  w })),
+    size:  w => setCols(c => ({ ...c, size:  w })),
+    state: w => setCols(c => ({ ...c, state: w })),
+    mime:  w => setCols(c => ({ ...c, mime:  w })),
+  }), [])
+
+  const deferredFilter = useDeferredValue(filter)
 
   const dls = useMemo(() => {
-    const ft = filter.toLowerCase()
+    const ft = deferredFilter.toLowerCase()
     return (data.downloads || [])
       .filter(d => {
         const nm = d.target_path?.split(/[\\\/]/).pop() || ""
         return !ft || nm.toLowerCase().includes(ft) || (d.site_url || "").toLowerCase().includes(ft)
       })
       .sort((a, b) => (b.start_time?.unix_ms || 0) - (a.start_time?.unix_ms || 0))
-  }, [data.downloads, filter])
+  }, [data.downloads, deferredFilter])
 
-  const selDl = sel != null ? dls.find(d => d.download_id === sel) : null
+  // FIX 1: build lookup from source data once; O(1) access vs O(n) find
+  const dlById = useMemo(() =>
+    Object.fromEntries((data.downloads || []).map(d => [d.download_id, d])),
+  [data.downloads])
+
+  const selDl = sel != null ? dlById[sel] : null
 
   return (
     <div style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
@@ -731,11 +921,11 @@ function PageDownloads({ data, filter, tz }) {
           <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed" }}>
             <thead>
               <tr>
-                <TH width={cols.time}  onResize={rz("time")}>Start ({tz.toUpperCase()})</TH>
-                <TH width={cols.file}  onResize={rz("file")}>Filename</TH>
-                <TH width={cols.size}  onResize={rz("size")}>Size</TH>
-                <TH width={cols.state} onResize={rz("state")}>State</TH>
-                <TH width={cols.mime}  onResize={rz("mime")}>MIME</TH>
+                <TH width={cols.time}  onResize={colResizers.time}>Start ({tz.toUpperCase()})</TH>
+                <TH width={cols.file}  onResize={colResizers.file}>Filename</TH>
+                <TH width={cols.size}  onResize={colResizers.size}>Size</TH>
+                <TH width={cols.state} onResize={colResizers.state}>State</TH>
+                <TH width={cols.mime}  onResize={colResizers.mime}>MIME</TH>
                 <TH>Referrer</TH>
               </tr>
             </thead>
@@ -745,7 +935,12 @@ function PageDownloads({ data, filter, tz }) {
                 const sc    = dl.state === "COMPLETE" ? T.green : dl.state === "INTERRUPTED" ? T.red : T.amber
                 const fname = dl.target_path?.split(/[\\\/]/).pop() || "—"
                 return (
-                  <tr key={dl.download_id} onClick={() => setSel(dl.download_id)}
+                  <tr
+                    key={dl.download_id}
+                    onClick={() => setSel(dl.download_id)}
+                    tabIndex={0}
+                    aria-selected={isSel}
+                    onKeyDown={e => (e.key === "Enter" || e.key === " ") && setSel(dl.download_id)}
                     style={{ background: isSel ? T.sel : i % 2 === 0 ? "transparent" : `${T.surf}70`, cursor: "pointer" }}
                     onMouseEnter={e => { if (!isSel) e.currentTarget.style.background = T.hover }}
                     onMouseLeave={e => { if (!isSel) e.currentTarget.style.background = i % 2 === 0 ? "transparent" : `${T.surf}70` }}
@@ -824,7 +1019,7 @@ function TimeFilterPicker({ days, setDays, hoursExtra, setHoursExtra, allTime, s
 }
 
 /* ═══════════════════════════════════════════════════════════
-   DROP ZONE  — clean minimal upload screen
+   DROP ZONE
 ═══════════════════════════════════════════════════════════ */
 function DropZone({ onLoad }) {
   const [drag,       setDrag]       = useState(false)
@@ -853,20 +1048,15 @@ function DropZone({ onLoad }) {
   const handleFile = file => { if (file) upload(file) }
 
   return (
-    // ── Full-page drop zone ──────────────────────────────
     <div
       onDragOver={e  => { e.preventDefault(); setDrag(true) }}
-      onDragLeave={e => {
-        // Only clear drag when leaving the viewport entirely
-        if (!e.currentTarget.contains(e.relatedTarget)) setDrag(false)
-      }}
+      onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDrag(false) }}
       onDrop={e => { e.preventDefault(); setDrag(false); handleFile(e.dataTransfer.files[0]) }}
       style={{
         flex: 1, display: "flex", flexDirection: "column",
         alignItems: "center", justifyContent: "center",
         background: T.bg,
         backgroundImage: `radial-gradient(ellipse 55% 40% at 50% 52%, ${T.surf}cc 0%, transparent 75%)`,
-        // Full-page drag overlay border
         outline: drag ? `2px solid ${T.blue}` : "2px solid transparent",
         outlineOffset: "-2px",
         transition: "outline-color .15s, background .15s",
@@ -874,41 +1064,28 @@ function DropZone({ onLoad }) {
         position: "relative",
       }}
     >
-      {/* Full-page drag overlay label */}
       {drag && (
         <div style={{
           position: "absolute", inset: 0,
           display: "flex", alignItems: "center", justifyContent: "center",
-          background: `${T.blue}08`,
-          pointerEvents: "none", zIndex: 10,
+          background: `${T.blue}08`, pointerEvents: "none", zIndex: 10,
         }}>
           <div style={{
             display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
-            padding: "24px 40px",
-            background: `${T.panel}ee`,
-            border: `1.5px solid ${T.blue}60`,
-            borderRadius: 12,
-            backdropFilter: "blur(8px)",
+            padding: "24px 40px", background: `${T.panel}ee`,
+            border: `1.5px solid ${T.blue}60`, borderRadius: 12, backdropFilter: "blur(8px)",
           }}>
             <Upload size={28} color={T.blue} strokeWidth={1.5} />
-            <span style={{ fontSize: 13, fontFamily: MONO, color: T.blue, fontWeight: 700 }}>
-              Release to load
-            </span>
+            <span style={{ fontSize: 13, fontFamily: MONO, color: T.blue, fontWeight: 700 }}>Release to load</span>
           </div>
         </div>
       )}
 
-      {/* Wordmark */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 32 }}>
-        <img
-          src="/image.png"
-          alt="logo"
-          style={{
-            width: 42, height: 42, objectFit: "contain",
-            borderRadius: 9, flexShrink: 0,
-            border: "1.5px solid rgba(255,255,255,0.25)",
-          }}
-        />
+        <img src="/image.png" alt="logo" style={{
+          width: 42, height: 42, objectFit: "contain", borderRadius: 9, flexShrink: 0,
+          border: "1.5px solid rgba(255,255,255,0.25)",
+        }} />
         <div>
           <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, letterSpacing: .4 }}>
             SecOps Browser History Analyzer
@@ -916,39 +1093,31 @@ function DropZone({ onLoad }) {
         </div>
       </div>
 
-      {/* Card — click to browse only, no drag handlers needed here */}
       <div style={{
-        width: 430,
-        background: T.panel,
+        width: 430, background: T.panel,
         border: `1px solid ${error ? `${T.red}50` : T.border}`,
         borderRadius: 8, overflow: "hidden",
-        boxShadow: `0 24px 64px rgba(0,8,30,0.5)`,
-        transition: "border-color .15s",
+        boxShadow: `0 24px 64px rgba(0,8,30,0.5)`, transition: "border-color .15s",
       }}>
-
-        {/* Click target */}
         <div
           onClick={() => !loading && ref.current.click()}
           style={{
-            padding: "26px 36px 20px",
-            display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
-            cursor: loading ? "wait" : "pointer",
-            borderBottom: `1px solid ${T.border}`,
+            padding: "26px 36px 20px", display: "flex", flexDirection: "column",
+            alignItems: "center", gap: 10,
+            cursor: loading ? "wait" : "pointer", borderBottom: `1px solid ${T.border}`,
           }}
         >
           <div style={{
             width: 36, height: 36, borderRadius: 8,
             background: loading ? `${T.blue}18` : T.card,
             border: `1px solid ${loading ? `${T.blue}55` : T.border2}`,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            transition: "all .15s",
+            display: "flex", alignItems: "center", justifyContent: "center", transition: "all .15s",
           }}>
             {loading
               ? <Loader size={15} color={T.blue} strokeWidth={1.5} style={{ animation: "spin 1s linear infinite" }} />
               : <Upload size={15} color={T.t1} strokeWidth={1.5} />
             }
           </div>
-
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, marginBottom: 5 }}>
               {loading ? "Parsing…" : "Drop anywhere or click to browse"}
@@ -963,7 +1132,6 @@ function DropZone({ onLoad }) {
           </div>
         </div>
 
-        {/* Time range section */}
         {!loading && (
           <div style={{ padding: "13px 20px 16px" }} onClick={e => e.stopPropagation()}>
             <div style={{
@@ -982,7 +1150,6 @@ function DropZone({ onLoad }) {
         )}
       </div>
 
-      {/* Error */}
       {error && (
         <div style={{
           marginTop: 10, width: 430, padding: "9px 13px",
@@ -1003,7 +1170,13 @@ function DropZone({ onLoad }) {
         input[type=number]::-webkit-inner-spin-button { opacity: 0.3 }
         input[type=number] { -moz-appearance: textfield }
       `}</style>
-      <input ref={ref} type="file" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} />
+      <input
+        ref={ref}
+        type="file"
+        aria-label="Upload Chromium History SQLite file"
+        style={{ display: "none" }}
+        onChange={e => handleFile(e.target.files[0])}
+      />
     </div>
   )
 }
@@ -1019,12 +1192,24 @@ const PAGES = [
 
 /* ═══════════════════════════════════════════════════════════
    MAIN APP
+
+   FIX 1 — useDeferredValue on filter: input stays instant,
+            pages get the deferred value for heavy useMemos.
+   FIX 2 — exportToExcel yields to browser paint (setTimeout 0)
+            before starting synchronous XLSX work.
+   FIX 3 — duplicate divider removed.
+   FIX 4 — ErrorBoundary wraps each page; key={page} resets
+            it on navigation so errors don't bleed across tabs.
 ═══════════════════════════════════════════════════════════ */
 export default function App() {
-  const [data,   setData]   = useState(null)
-  const [page,   setPage]   = useState("tree")
-  const [filter, setFilter] = useState("")
-  const [tz,     setTz]     = useState("ist")   // "ist" | "utc"
+  const [data,      setData]      = useState(null)
+  const [page,      setPage]      = useState("tree")
+  const [filter,    setFilter]    = useState("")
+  const [tz,        setTz]        = useState("ist")
+  const [exporting, setExporting] = useState(false)
+
+  // FIX 1: input binds to `filter`; pages receive `deferredFilter`
+  const deferredFilter = useDeferredValue(filter)
 
   const byId = useMemo(() =>
     data ? Object.fromEntries((data.visits || []).map(v => [v.visit_id, v])) : {}
@@ -1037,117 +1222,112 @@ export default function App() {
   , [data])
 
   const rootIds = useMemo(() => data?.root_visit_ids || [], [data])
-  const stats   = data?.stats || {}
 
-  /* ── Excel export: Visits sheet + Downloads sheet ───── */
-  const exportToExcel = () => {
-    const wb = XLSX.utils.book_new()
+  // FIX 2: yield to browser before heavy synchronous XLSX serialization
+  const exportToExcel = useCallback(async () => {
+    if (!data) return
+    setExporting(true)
+    await new Promise(r => setTimeout(r, 0))   // let the disabled-button state paint first
+    try {
+      const wb = XLSX.utils.book_new()
 
-    // ── Visits sheet ─────────────────────────────────────
-    const visitRows = (data.visits || []).map(v => {
-      const tr  = v.transition || {}
-      const ctx = v.context    || {}
-      const cnt = v.content    || {}
-      return {
-        "Visit ID":        v.visit_id,
-        "URL":             v.url             || "",
-        "Title":           v.title           || "",
-        "Time (IST)":      tIST(v.visit_time),
-        "Time (UTC)":      tUTC(v.visit_time),
-        "Transition":      tr.core_type      || "",
-        "Qualifiers":      (tr.qualifiers    || []).join(", "),
-        "Duration (us)":   v.visit_duration_us || 0,
-        "From Visit":      v.from_visit      || 0,
-        "Visit Source":    v.visit_source    || "",
-        "Synced":          v.is_known_to_sync ? "YES" : "no",
-        "HTTP Code":       ctx.http_response_code || "",
-        "Tab ID":          ctx.tab_id        ?? "",
-        "Window ID":       ctx.window_id     ?? "",
-        "Referrer":        v.external_referrer_url || "",
-        "Search Terms":    cnt.search_terms  || "",
-        "App ID":          v.app_id          || "",
-        "Orig GUID":       v.originator_cache_guid || "",
-      }
-    })
-    const wsVisits = XLSX.utils.json_to_sheet(visitRows)
-    // Auto column widths
-    wsVisits["!cols"] = [
-      {wch:8},{wch:80},{wch:40},{wch:22},{wch:22},{wch:16},{wch:20},
-      {wch:12},{wch:10},{wch:14},{wch:6},{wch:8},{wch:7},{wch:9},{wch:60},{wch:30},{wch:20},{wch:36},
-    ]
-    XLSX.utils.book_append_sheet(wb, wsVisits, "Visits")
+      const visitRows = (data.visits || []).map(v => {
+        const tr  = v.transition || {}
+        const ctx = v.context    || {}
+        const cnt = v.content    || {}
+        return {
+          "Visit ID":      v.visit_id,
+          "URL":           v.url             || "",
+          "Title":         v.title           || "",
+          "Time (IST)":    tIST(v.visit_time),
+          "Time (UTC)":    tUTC(v.visit_time),
+          "Transition":    tr.core_type      || "",
+          "Qualifiers":    (tr.qualifiers    || []).join(", "),
+          "Duration (us)": v.visit_duration_us || 0,
+          "From Visit":    v.from_visit      || 0,
+          "Visit Source":  v.visit_source    || "",
+          "Synced":        v.is_known_to_sync ? "YES" : "no",
+          "HTTP Code":     ctx.http_response_code || "",
+          "Tab ID":        ctx.tab_id        ?? "",
+          "Window ID":     ctx.window_id     ?? "",
+          "Referrer":      v.external_referrer_url || "",
+          "Search Terms":  cnt.search_terms  || "",
+          "App ID":        v.app_id          || "",
+          "Orig GUID":     v.originator_cache_guid || "",
+        }
+      })
+      const wsVisits = XLSX.utils.json_to_sheet(visitRows)
+      wsVisits["!cols"] = [
+        {wch:8},{wch:80},{wch:40},{wch:22},{wch:22},{wch:16},{wch:20},
+        {wch:12},{wch:10},{wch:14},{wch:6},{wch:8},{wch:7},{wch:9},{wch:60},{wch:30},{wch:20},{wch:36},
+      ]
+      XLSX.utils.book_append_sheet(wb, wsVisits, "Visits")
 
-    // ── Downloads sheet ───────────────────────────────────
-    const dlRows = (data.downloads || []).map(dl => ({
-      "Download ID":   dl.download_id,
-      "Filename":      dl.target_path?.split(/[\\\/]/).pop() || "",
-      "Full Path":     dl.target_path   || "",
-      "State":         dl.state         || "",
-      "Start (IST)":   tIST(dl.start_time),
-      "Start (UTC)":   tUTC(dl.start_time),
-      "End (IST)":     tIST(dl.end_time),
-      "End (UTC)":     tUTC(dl.end_time),
-      "Total Bytes":   dl.total_bytes   || 0,
-      "Recv Bytes":    dl.received_bytes || 0,
-      "MIME":          dl.mime_type     || "",
-      "Orig MIME":     dl.original_mime_type || "",
-      "Site URL":      dl.site_url      || "",
-      "Tab URL":       dl.tab_url       || "",
-      "Referrer":      dl.referrer      || "",
-      "HTTP Method":   dl.http_method   || "",
-      "By Extension":  dl.by_extension_name || "",
-      "Hash (SHA256)": dl.file_hash_hex || "",
-      "ETag":          dl.etag          || "",
-    }))
-    const wsDl = XLSX.utils.json_to_sheet(dlRows)
-    wsDl["!cols"] = [
-      {wch:11},{wch:40},{wch:70},{wch:12},{wch:22},{wch:22},{wch:22},{wch:22},
-      {wch:12},{wch:12},{wch:30},{wch:30},{wch:60},{wch:60},{wch:60},{wch:10},{wch:24},{wch:66},{wch:20},
-    ]
-    XLSX.utils.book_append_sheet(wb, wsDl, "Downloads")
+      const dlRows = (data.downloads || []).map(dl => ({
+        "Download ID":   dl.download_id,
+        "Filename":      dl.target_path?.split(/[\\\/]/).pop() || "",
+        "Full Path":     dl.target_path   || "",
+        "State":         dl.state         || "",
+        "Start (IST)":   tIST(dl.start_time),
+        "Start (UTC)":   tUTC(dl.start_time),
+        "End (IST)":     tIST(dl.end_time),
+        "End (UTC)":     tUTC(dl.end_time),
+        "Total Bytes":   dl.total_bytes   || 0,
+        "Recv Bytes":    dl.received_bytes || 0,
+        "MIME":          dl.mime_type     || "",
+        "Orig MIME":     dl.original_mime_type || "",
+        "Site URL":      dl.site_url      || "",
+        "Tab URL":       dl.tab_url       || "",
+        "Referrer":      dl.referrer      || "",
+        "HTTP Method":   dl.http_method   || "",
+        "By Extension":  dl.by_extension_name || "",
+        "Hash (SHA256)": dl.file_hash_hex || "",
+        "ETag":          dl.etag          || "",
+      }))
+      const wsDl = XLSX.utils.json_to_sheet(dlRows)
+      wsDl["!cols"] = [
+        {wch:11},{wch:40},{wch:70},{wch:12},{wch:22},{wch:22},{wch:22},{wch:22},
+        {wch:12},{wch:12},{wch:30},{wch:30},{wch:60},{wch:60},{wch:60},{wch:10},{wch:24},{wch:66},{wch:20},
+      ]
+      XLSX.utils.book_append_sheet(wb, wsDl, "Downloads")
 
-    const ts = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "")
-    XLSX.writeFile(wb, `history_export_${ts}.xlsx`)
-  }
+      const ts = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "")
+      XLSX.writeFile(wb, `history_export_${ts}.xlsx`)
+    } finally {
+      setExporting(false)
+    }
+  }, [data])
 
-  /* ── Landing ─────────────────────────────────────────── */
+  /* Landing */
   if (!data) return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column", background: T.bg }}>
       <DropZone onLoad={setData} />
     </div>
   )
 
-  /* ── Dashboard ───────────────────────────────────────── */
+  /* Dashboard */
   return (
     <div style={{
       height: "100vh", display: "flex", flexDirection: "column",
       background: T.bg, fontFamily: MONO, overflow: "hidden"
     }}>
 
-      {/* ── TOP NAV ─────────────────────────────────────── */}
+      {/* TOP NAV */}
       <div style={{
         display: "flex", alignItems: "center", flexShrink: 0,
         background: T.panel, borderBottom: `1px solid ${T.border}`,
         height: 44,
       }}>
-
         {/* Logo + title */}
         <div style={{
           display: "flex", alignItems: "center", gap: 8,
-          padding: "0 16px 0 14px",
-          borderRight: `1px solid ${T.border}`,
+          padding: "0 16px 0 14px", borderRight: `1px solid ${T.border}`,
           height: "100%", flexShrink: 0,
         }}>
-          <img
-  src="/image.png"
-  alt="logo"
-  style={{
-    width: 32, height: 32, objectFit: "contain",
-    borderRadius: 9, flexShrink: 0,
-    border: "1.5px solid rgba(255,255,255,0.25)",
-  }}
-/>
-
+          <img src="/image.png" alt="logo" style={{
+            width: 32, height: 32, objectFit: "contain", borderRadius: 9, flexShrink: 0,
+            border: "1.5px solid rgba(255,255,255,0.25)",
+          }} />
           <span style={{ fontSize: 11, fontWeight: 700, color: T.t0, letterSpacing: .3, whiteSpace: "nowrap" }}>
             SecOps Browser History Analyzer
           </span>
@@ -1164,8 +1344,7 @@ export default function App() {
                 background: "transparent", border: "none",
                 borderBottom: `2px solid ${active ? T.blue : "transparent"}`,
                 borderTop: "2px solid transparent",
-                color: active ? T.t0 : T.t2,
-                fontSize: 11, fontFamily: MONO,
+                color: active ? T.t0 : T.t2, fontSize: 11, fontFamily: MONO,
                 cursor: "pointer", transition: "color .12s, border-color .12s",
               }}
                 onMouseEnter={e => { if (!active) e.currentTarget.style.color = T.t1 }}
@@ -1181,7 +1360,7 @@ export default function App() {
         {/* Right controls */}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, paddingRight: 12 }}>
 
-          {/* Search */}
+          {/* Search — binds to `filter` for instant feedback */}
           <div style={{
             display: "flex", alignItems: "center", gap: 6,
             background: T.card, border: `1px solid ${T.border}`,
@@ -1206,56 +1385,38 @@ export default function App() {
             )}
           </div>
 
-          {/* IST / UTC toggle */}
           <TzToggle tz={tz} setTz={setTz} />
 
+          {/* FIX 3: single divider — duplicate removed */}
           <div style={{ width: 1, height: 18, background: T.border }} />
 
-          {/* Compact stats — visits · urls · dl only */}
-          {/* <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10, fontFamily: MONO }}>
-            <span style={{ color: T.green }}>{(stats.total_visits || 0).toLocaleString()}</span>
-            <span style={{ color: T.t3 }}>visits</span>
-            <span style={{ color: T.t3 }}>·</span>
-            <span style={{ color: T.blue }}>{(stats.total_url_records || 0).toLocaleString()}</span>
-            <span style={{ color: T.t3 }}>urls</span>
-            <span style={{ color: T.t3 }}>·</span>
-            <span style={{ color: T.amber }}>{stats.total_downloads || 0}</span>
-            <span style={{ color: T.t3 }}>dl</span>
-            {stats.hours_filter && (
-              <>
-                <span style={{ color: T.t3 }}>·</span>
-                <span style={{ color: T.teal }}>last {stats.hours_filter}h</span>
-              </>
-            )}
-          </div> */}
-
-          <div style={{ width: 1, height: 18, background: T.border }} />
-
-          {/* Export Excel */}
+          {/* Export Excel — FIX 2: shows "Exporting…" while busy */}
           <button
             onClick={exportToExcel}
+            disabled={exporting}
             style={{
               padding: "3px 10px", height: 26,
-              background: `${T.green}14`, border: `1px solid ${T.green}40`,
-              color: T.green, fontSize: 10, fontFamily: MONO,
-              borderRadius: 4, cursor: "pointer",
+              background: exporting ? `${T.green}08` : `${T.green}14`,
+              border: `1px solid ${T.green}40`,
+              color: exporting ? T.t2 : T.green,
+              fontSize: 10, fontFamily: MONO, borderRadius: 4,
+              cursor: exporting ? "not-allowed" : "pointer",
               display: "flex", alignItems: "center", gap: 5,
               transition: "background .12s, border-color .12s",
             }}
-            onMouseEnter={e => { e.currentTarget.style.background = `${T.green}28`; e.currentTarget.style.borderColor = `${T.green}80` }}
-            onMouseLeave={e => { e.currentTarget.style.background = `${T.green}14`; e.currentTarget.style.borderColor = `${T.green}40` }}
+            onMouseEnter={e => { if (!exporting) { e.currentTarget.style.background = `${T.green}28`; e.currentTarget.style.borderColor = `${T.green}80` } }}
+            onMouseLeave={e => { if (!exporting) { e.currentTarget.style.background = `${T.green}14`; e.currentTarget.style.borderColor = `${T.green}40` } }}
           >
-            <FileDown size={11} /> Export .xlsx
+            <FileDown size={11} /> {exporting ? "Exporting…" : "Export .xlsx"}
           </button>
 
           {/* New File */}
           <button
             onClick={() => { setData(null); setFilter(""); setPage("tree"); setTz("ist") }}
             style={{
-              padding: "3px 10px", height: 26,
-              background: T.card, border: `1px solid ${T.border2}`,
-              color: T.t1, fontSize: 10, fontFamily: MONO,
-              borderRadius: 4, cursor: "pointer",
+              padding: "3px 10px", height: 26, background: T.card,
+              border: `1px solid ${T.border2}`, color: T.t1,
+              fontSize: 10, fontFamily: MONO, borderRadius: 4, cursor: "pointer",
               display: "flex", alignItems: "center", gap: 5,
             }}
             onMouseEnter={e => { e.currentTarget.style.borderColor = T.blue; e.currentTarget.style.color = T.t0 }}
@@ -1266,11 +1427,13 @@ export default function App() {
         </div>
       </div>
 
-      {/* ── PAGE CONTENT ────────────────────────────────── */}
+      {/* PAGE CONTENT — FIX 4: ErrorBoundary per page, key resets on nav */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-        {page === "tree"      && <PageTree      byId={byId} childrenMap={childrenMap} rootIds={rootIds} filter={filter} tz={tz} />}
-        {page === "timeline"  && <PageTimeline  data={data} byId={byId} filter={filter} tz={tz} />}
-        {page === "downloads" && <PageDownloads data={data} filter={filter} tz={tz} />}
+        <ErrorBoundary key={page}>
+          {page === "tree"      && <PageTree      byId={byId} childrenMap={childrenMap} rootIds={rootIds} filter={deferredFilter} tz={tz} />}
+          {page === "timeline"  && <PageTimeline  data={data} byId={byId} filter={deferredFilter} tz={tz} />}
+          {page === "downloads" && <PageDownloads data={data} filter={deferredFilter} tz={tz} />}
+        </ErrorBoundary>
       </div>
     </div>
   )

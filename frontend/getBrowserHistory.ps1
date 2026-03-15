@@ -1,4 +1,4 @@
-<#
+<# By Prakhar Sinha
 .SYNOPSIS
     Forensic History Collector for Defender Live Response.
     Merges WAL into main DB before staging, so uploaded files parse correctly.
