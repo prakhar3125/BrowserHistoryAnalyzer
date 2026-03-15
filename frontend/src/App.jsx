@@ -1018,9 +1018,6 @@ function TimeFilterPicker({ days, setDays, hoursExtra, setHoursExtra, allTime, s
   )
 }
 
-/* ═══════════════════════════════════════════════════════════
-   DROP ZONE
-═══════════════════════════════════════════════════════════ */
 function DropZone({ onLoad }) {
   const [drag,       setDrag]       = useState(false)
   const [loading,    setLoading]    = useState(false)
@@ -1055,109 +1052,227 @@ function DropZone({ onLoad }) {
       style={{
         flex: 1, display: "flex", flexDirection: "column",
         alignItems: "center", justifyContent: "center",
-        background: T.bg,
-        backgroundImage: `radial-gradient(ellipse 55% 40% at 50% 52%, ${T.surf}cc 0%, transparent 75%)`,
-        outline: drag ? `2px solid ${T.blue}` : "2px solid transparent",
-        outlineOffset: "-2px",
-        transition: "outline-color .15s, background .15s",
-        cursor: loading ? "wait" : "default",
-        position: "relative",
+        background: T.bg, position: "relative", overflow: "hidden",
       }}
     >
+      {/* Grid background */}
+      <div style={{
+        position: "absolute", inset: 0, pointerEvents: "none",
+        backgroundImage: `
+          linear-gradient(${T.border}28 1px, transparent 1px),
+          linear-gradient(90deg, ${T.border}28 1px, transparent 1px)
+        `,
+        backgroundSize: "48px 48px",
+        maskImage: "radial-gradient(ellipse 70% 70% at 50% 50%, black 20%, transparent 80%)",
+        WebkitMaskImage: "radial-gradient(ellipse 70% 70% at 50% 50%, black 20%, transparent 80%)",
+      }} />
+
+      {/* Glow orb */}
+      <div style={{
+        position: "absolute", width: 560, height: 360,
+        background: `radial-gradient(ellipse, ${T.blue}0f 0%, transparent 70%)`,
+        top: "50%", left: "50%", transform: "translate(-50%, -55%)",
+        pointerEvents: "none",
+      }} />
+
+      {/* Drag overlay */}
       {drag && (
         <div style={{
-          position: "absolute", inset: 0,
+          position: "absolute", inset: 0, zIndex: 10,
+          background: `${T.blue}08`,
+          border: `2px solid ${T.blue}60`,
           display: "flex", alignItems: "center", justifyContent: "center",
-          background: `${T.blue}08`, pointerEvents: "none", zIndex: 10,
+          backdropFilter: "blur(2px)",
         }}>
           <div style={{
-            display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
-            padding: "24px 40px", background: `${T.panel}ee`,
-            border: `1.5px solid ${T.blue}60`, borderRadius: 12, backdropFilter: "blur(8px)",
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
+            padding: "28px 52px",
+            background: `${T.panel}f0`,
+            border: `1px solid ${T.blue}50`,
+            borderRadius: 10,
           }}>
-            <Upload size={28} color={T.blue} strokeWidth={1.5} />
-            <span style={{ fontSize: 13, fontFamily: MONO, color: T.blue, fontWeight: 700 }}>Release to load</span>
+            <Upload size={26} color={T.blue} strokeWidth={1.5} />
+            <span style={{ fontSize: 12, fontFamily: MONO, color: T.blue, fontWeight: 700, letterSpacing: .5 }}>
+              Release to analyze
+            </span>
           </div>
         </div>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 32 }}>
-        <img src="/image.png" alt="logo" style={{
-          width: 42, height: 42, objectFit: "contain", borderRadius: 9, flexShrink: 0,
-          border: "1.5px solid rgba(255,255,255,0.25)",
-        }} />
+      {/* Header — restored image.png logo */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 32, position: "relative" }}>
+        <img
+          src="/image.png"
+          alt="logo"
+          style={{
+            width: 45, height: 45, objectFit: "contain",
+            borderRadius: 9, flexShrink: 0,
+            border: "1.5px ",
+          }}
+        />
         <div>
-          <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, letterSpacing: .4 }}>
+          <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, letterSpacing: .3 }}>
             SecOps Browser History Analyzer
           </div>
+          
         </div>
       </div>
 
+      {/* Main card */}
       <div style={{
-        width: 430, background: T.panel,
-        border: `1px solid ${error ? `${T.red}50` : T.border}`,
-        borderRadius: 8, overflow: "hidden",
-        boxShadow: `0 24px 64px rgba(0,8,30,0.5)`, transition: "border-color .15s",
+        width: 480, position: "relative",
+        border: `1px solid ${drag ? T.blue : error ? `${T.red}50` : T.border}`,
+        borderRadius: 10, overflow: "hidden",
+        background: T.panel,
+        boxShadow: `0 32px 80px rgba(0,4,20,0.55), 0 0 0 1px ${T.border}22 inset`,
+        transition: "border-color .15s",
       }}>
+
+        {/* Loading scan bar */}
+        {loading && (
+          <div style={{
+            position: "absolute", top: 0, left: 0, right: 0, height: 2,
+            background: `${T.blue}22`, zIndex: 5,
+          }}>
+            <div style={{
+              height: "100%",
+              background: `linear-gradient(90deg, transparent, ${T.blue}, transparent)`,
+              animation: "scanBar 1.4s ease-in-out infinite",
+            }} />
+          </div>
+        )}
+
+        {/* Upload zone */}
         <div
           onClick={() => !loading && ref.current.click()}
           style={{
-            padding: "26px 36px 20px", display: "flex", flexDirection: "column",
-            alignItems: "center", gap: 10,
-            cursor: loading ? "wait" : "pointer", borderBottom: `1px solid ${T.border}`,
+            padding: "32px 40px 28px",
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
+            cursor: loading ? "wait" : "pointer",
+            borderBottom: `1px solid ${T.border}`,
+            position: "relative",
           }}
         >
+          {/* Corner accents */}
+          {[
+            { top: 14,    left: 14,    borderTop: true,    borderLeft: true  },
+            { top: 14,    right: 14,   borderTop: true,    borderRight: true },
+            { bottom: 14, left: 14,    borderBottom: true, borderLeft: true  },
+            { bottom: 14, right: 14,   borderBottom: true, borderRight: true },
+          ].map((s, i) => (
+            <div key={i} style={{
+              position: "absolute",
+              top:    s.top    ?? undefined,
+              left:   s.left   ?? undefined,
+              right:  s.right  ?? undefined,
+              bottom: s.bottom ?? undefined,
+              width: 10, height: 10,
+              borderTop:    s.borderTop    ? `1px solid ${T.blue}50` : "none",
+              borderBottom: s.borderBottom ? `1px solid ${T.blue}50` : "none",
+              borderLeft:   s.borderLeft   ? `1px solid ${T.blue}50` : "none",
+              borderRight:  s.borderRight  ? `1px solid ${T.blue}50` : "none",
+            }} />
+          ))}
+
           <div style={{
-            width: 36, height: 36, borderRadius: 8,
+            width: 46, height: 46, borderRadius: 10,
             background: loading ? `${T.blue}18` : T.card,
-            border: `1px solid ${loading ? `${T.blue}55` : T.border2}`,
-            display: "flex", alignItems: "center", justifyContent: "center", transition: "all .15s",
+            border: `1px solid ${loading ? T.blue : T.border2}40`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            transition: "all .2s",
           }}>
             {loading
-              ? <Loader size={15} color={T.blue} strokeWidth={1.5} style={{ animation: "spin 1s linear infinite" }} />
-              : <Upload size={15} color={T.t1} strokeWidth={1.5} />
+              ? <Loader size={18} color={T.blue} strokeWidth={1.5} style={{ animation: "spin 1s linear infinite" }} />
+              : <Upload size={18} color={T.t1} strokeWidth={1.5} />
             }
           </div>
+
           <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 13, fontFamily: MONO, fontWeight: 700, color: T.t0, marginBottom: 5 }}>
-              {loading ? "Parsing…" : "Drop anywhere or click to browse"}
+            <div style={{ fontSize: 12, fontFamily: MONO, fontWeight: 700, color: T.t0, marginBottom: 6, letterSpacing: .2 }}>
+              {loading ? "Parsing history database…" : "Drop file or click to browse"}
             </div>
             {!loading && (
-              <div style={{ fontSize: 10, fontFamily: MONO, color: T.t2, lineHeight: 1.9 }}>
+              <div style={{ fontSize: 10, fontFamily: MONO, color: T.t2, lineHeight: 1.8 }}>
                 Raw Chromium{" "}
-                <code style={{ color: T.blue, background: `${T.blue}14`, padding: "1px 5px", borderRadius: 3 }}>History</code>
-                {" SQLite file"}
+                <code style={{
+                  color: T.blue, background: `${T.blue}14`,
+                  padding: "1px 6px", borderRadius: 3, fontSize: 9,
+                }}>History</code>{" "}
+                SQLite file
               </div>
             )}
           </div>
         </div>
 
+        {/* ── Time Range ── */}
         {!loading && (
-          <div style={{ padding: "13px 20px 16px" }} onClick={e => e.stopPropagation()}>
-            <div style={{
-              fontSize: 9, fontFamily: MONO, color: T.t2,
-              textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 10,
-              display: "flex", alignItems: "center", gap: 5,
-            }}>
-              <Clock size={9} color={T.t2} /> Time Range
+          <div style={{ padding: "22px 32px 28px" }} onClick={e => e.stopPropagation()}>
+
+            {/* Divider label */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18 }}>
+              <div style={{ flex: 1, height: 1, background: T.border }} />
+              <span style={{
+                fontSize: 9, fontFamily: MONO, color: T.t2,
+                textTransform: "uppercase", letterSpacing: 1.4,
+              }}>Time Range</span>
+              <div style={{ flex: 1, height: 1, background: T.border }} />
             </div>
-            <TimeFilterPicker
-              days={days} setDays={setDays}
-              hoursExtra={hoursExtra} setHoursExtra={setHoursExtra}
-              allTime={allTime} setAllTime={setAllTime}
-            />
+
+            {/* Preset pills — centered, full-width spread */}
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(6, 1fr)",
+              gap: 6,
+              marginBottom: 20,
+            }}>
+              {PRESETS.map(p => {
+                const on = p.hours === null
+                  ? allTime
+                  : !allTime && (days * 24 + hoursExtra) === p.hours
+                return (
+                  <button
+                    key={p.label}
+                    onClick={() => {
+                      if (p.hours === null) { setAllTime(true); return }
+                      setAllTime(false)
+                      setDays(Math.floor(p.hours / 24))
+                      setHoursExtra(p.hours % 24)
+                    }}
+                    style={{
+                      padding: "7px 0", fontSize: 11, fontFamily: MONO,
+                      background: on ? `${T.blue}20` : T.card,
+                      border: `1px solid ${on ? T.blue : T.border}`,
+                      color: on ? T.blue : T.t2,
+                      borderRadius: 5, cursor: "pointer",
+                      fontWeight: on ? 700 : 400,
+                      transition: "all .12s",
+                      textAlign: "center",
+                    }}
+                    onMouseEnter={e => { if (!on) { e.currentTarget.style.borderColor = T.blue; e.currentTarget.style.color = T.t1 } }}
+                    onMouseLeave={e => { if (!on) { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.t2 } }}
+                  >
+                    {p.label}
+                  </button>
+                )
+              })}
+            </div>
+
+           
+
+
           </div>
         )}
       </div>
 
+      {/* Error */}
       {error && (
         <div style={{
-          marginTop: 10, width: 430, padding: "9px 13px",
-          background: `${T.red}0d`, border: `1px solid ${T.red}2a`,
+          marginTop: 10, width: 480, padding: "10px 14px",
+          background: `${T.red}0c`, border: `1px solid ${T.red}25`,
           borderRadius: 6, display: "flex", alignItems: "flex-start", gap: 8,
         }}>
-          <div style={{ width: 4, height: 4, borderRadius: "50%", background: T.red, marginTop: 4, flexShrink: 0 }} />
-          <span style={{ flex: 1, fontSize: 10, fontFamily: MONO, color: `${T.red}bb`, lineHeight: 1.5 }}>{error}</span>
+          <div style={{ width: 3, height: 3, borderRadius: "50%", background: T.red, marginTop: 5, flexShrink: 0 }} />
+          <span style={{ flex: 1, fontSize: 10, fontFamily: MONO, color: `${T.red}bb`, lineHeight: 1.6 }}>{error}</span>
           <button onClick={() => setError(null)}
             style={{ background: "none", border: "none", cursor: "pointer", color: T.t2, padding: 0, display: "flex", flexShrink: 0 }}>
             <X size={10} />
@@ -1165,8 +1280,11 @@ function DropZone({ onLoad }) {
         </div>
       )}
 
+      
+
       <style>{`
-        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+        @keyframes spin    { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+        @keyframes scanBar { 0% { width:0%;margin-left:0 } 50% { width:60%;margin-left:20% } 100% { width:0%;margin-left:100% } }
         input[type=number]::-webkit-inner-spin-button { opacity: 0.3 }
         input[type=number] { -moz-appearance: textfield }
       `}</style>
@@ -1325,8 +1443,8 @@ export default function App() {
           height: "100%", flexShrink: 0,
         }}>
           <img src="/image.png" alt="logo" style={{
-            width: 32, height: 32, objectFit: "contain", borderRadius: 9, flexShrink: 0,
-            border: "1.5px solid rgba(255,255,255,0.25)",
+            width: 36, height: 36, objectFit: "contain", borderRadius: 9, flexShrink: 0,
+            border: "1.2px ",
           }} />
           <span style={{ fontSize: 11, fontWeight: 700, color: T.t0, letterSpacing: .3, whiteSpace: "nowrap" }}>
             SecOps Browser History Analyzer
